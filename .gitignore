@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+
+# Claude Code per-machine state — personal allowlist, paths, credentials.
+.claude/settings.local.json
+.claude/.credentials.json

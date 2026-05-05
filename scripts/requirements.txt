@@ -1,0 +1,19 @@
+# Базовые кросс-платформенные зависимости (только не-бэкенд штуки).
+# Whisper-бэкенд ставится ОТДЕЛЬНО — какой именно, зависит от платформы:
+#   Apple Silicon:    pip install mlx-whisper        (через MLX, GPU/Metal)
+#                     ИЛИ собрать whisper.cpp        (см. references/setup.md)
+#   Linux / Windows:  pip install faster-whisper     (CTranslate2, CPU)
+#
+# Скилл сам автодетектит, что установлено, и использует. Ставить mlx-whisper
+# на Linux/Windows нельзя — pip упадёт на резолве (mlx — Apple-only).
+
+# Локальная диаризация без токенов (опциональная, но дешёвая по размеру).
+resemblyzer>=0.1.4
+scikit-learn>=1.3.0
+
+
+# --- ОПЦИОНАЛЬНОЕ ---
+
+# pyannote.audio — точнее resemblyzer, но требует бесплатный HF_TOKEN.
+# См. references/setup.md → раздел «HF_TOKEN для pyannote».
+# pip install pyannote.audio
