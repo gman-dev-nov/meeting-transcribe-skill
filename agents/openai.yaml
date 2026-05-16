@@ -1,0 +1,6 @@
+name: meeting-transcribe
+description: Локальная транскрипция и анализ записей созвонов (Whisper + структурированный отчёт на русском).
+invocationPolicy: auto
+dependencies:
+  - ffmpeg
+  - python>=3.10
