@@ -17,9 +17,10 @@ cd ~/whisper.cpp
 cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j 8
 
-# 3. Модели в ggml-формате
-bash models/download-ggml-model.sh large-v3-turbo   # ~1.5 ГБ — для fast/balanced
-bash models/download-ggml-model.sh large-v3         # ~3 ГБ — опционально для quality
+# 3. Модель в ggml-формате — поставь ОДНУ (можно потом докачать вторую)
+bash models/download-ggml-model.sh large-v3-turbo   # ~1.5 ГБ — дефолт (пресеты fast/balanced)
+# ИЛИ если планируешь важные/сложные записи и сразу пресет quality:
+# bash models/download-ggml-model.sh large-v3       # ~3 ГБ — пресет quality, точнее на тяжёлом аудио
 
 # 4. Локальная диаризация (опционально — нужна только если будешь использовать --diarize)
 python3 -m venv ~/.venvs/whisper
@@ -31,6 +32,25 @@ pip install resemblyzer scikit-learn
 Скилл найдёт whisper.cpp автоматически по путям: `$WHISPER_CPP_HOME`, `~/whisper.cpp/`, `~/.local/share/whisper.cpp/`, или через `whisper-cli` в `$PATH`. Если нестандартное место — выстави `export WHISPER_CPP_HOME=/path/to/whisper.cpp`.
 
 Проверка: `python scripts/setup_check.py` — wizard покажет, всё ли на месте.
+
+### Какую модель выбрать и как докачать вторую
+
+| Модель | Размер | Пресеты | Когда брать |
+|---|---|---|---|
+| `large-v3-turbo` | ~1.5 ГБ | `fast` (beam=1), `balanced` (beam=5) | **Дефолт.** Рабочие созвоны, планёрки, длинные записи, большинство сценариев |
+| `large-v3` | ~3 ГБ | `quality` (beam=5) | Юридически важные записи, интервью на публикацию, плохое аудио (тихая речь, длинные паузы, перекрытия), точные дословные цитаты |
+
+`turbo` — дистиллят `large-v3`: меньше декодер-слоёв, в ~2× быстрее. **Не «1–2% WER разница»** — на чистом аудио расхождение умеренное, на сложном (тихая/эмоциональная речь, длинные паузы, низкий битрейт) `large-v3` заметно точнее и сильно реже залипает.
+
+Скачать любую отдельно — одна команда, скилл подхватит сразу:
+
+```bash
+cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo
+# или
+cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3
+```
+
+Если установлен только `turbo` и запросить `--preset quality` — `transcribe.py` остановится с подсказкой про команду докачки. Препроцессор `--analyze` в любом случае предложит только те пресеты, для которых модель есть.
 
 ## Минимальная альтернатива (без сборки whisper.cpp)
 

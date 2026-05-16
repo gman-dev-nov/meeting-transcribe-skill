@@ -64,22 +64,38 @@ def main() -> int:
         "/opt/homebrew/bin/whisper-cli",
     ]
     has_wcpp_bin = any(p and Path(p).is_file() for p in wcpp_paths) or shutil.which("whisper-cli") is not None
-    wcpp_models_ok = False
-    if has_wcpp_bin:
-        for cand in [f"{Path.home()}/whisper.cpp/models/ggml-large-v3-turbo.bin",
-                     f"{os.environ.get('WHISPER_CPP_HOME', '')}/models/ggml-large-v3-turbo.bin",
-                     f"{Path.home()}/.local/share/whisper.cpp/models/ggml-large-v3-turbo.bin"]:
-            if cand and Path(cand).is_file():
-                wcpp_models_ok = True
-                break
+
+    def _has_wcpp_model(name: str) -> bool:
+        candidates = [
+            f"{Path.home()}/whisper.cpp/models/ggml-{name}.bin",
+            f"{os.environ.get('WHISPER_CPP_HOME', '')}/models/ggml-{name}.bin",
+            f"{Path.home()}/.local/share/whisper.cpp/models/ggml-{name}.bin",
+        ]
+        return any(p and Path(p).is_file() for p in candidates)
+
+    wcpp_has_turbo = has_wcpp_bin and _has_wcpp_model("large-v3-turbo")
+    wcpp_has_v3 = has_wcpp_bin and _has_wcpp_model("large-v3")
+    wcpp_usable = has_wcpp_bin and (wcpp_has_turbo or wcpp_has_v3)
 
     check("whisper.cpp (рекомендуемый дефолт на Apple Silicon)", has_wcpp_bin,
           "pip install cmake && git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp && "
           "cd ~/whisper.cpp && cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release && "
           "cmake --build build --config Release -j 8")
     if has_wcpp_bin:
-        check("  ggml-large-v3-turbo.bin (модель)", wcpp_models_ok,
+        # Обе модели опциональны по отдельности, но минимум одна нужна.
+        # Дефолтный выбор — turbo (быстро, ~1.5 ГБ, пресеты fast/balanced).
+        # large-v3 нужен только для пресета quality (~3 ГБ, точнее на сложном аудио).
+        check("  ggml-large-v3-turbo.bin (fast/balanced, ~1.5 ГБ)", wcpp_has_turbo,
               "cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo")
+        if wcpp_has_v3:
+            check("  ggml-large-v3.bin (quality, ~3 ГБ)", True)
+        else:
+            warn("  ggml-large-v3.bin не скачан — нужен только для пресета quality (~3 ГБ)",
+                 "докачать когда понадобится: "
+                 "cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3")
+        if not wcpp_has_turbo and not wcpp_has_v3:
+            print("      → ни одной модели не скачано, бэкенд не запустится. "
+                  "Минимум одну (см. выше).")
 
     try:
         import mlx_whisper  # noqa
@@ -103,7 +119,7 @@ def main() -> int:
         warn("mlx-whisper недоступен на этой платформе",
              "пакет работает только на Apple Silicon (M-чипы), пропусти этот пункт")
 
-    if not (has_wcpp_bin or has_mlx or has_fw):
+    if not (wcpp_usable or has_mlx or has_fw):
         print("\n  ⚠️  Без бэкенда транскрипция не запустится.")
 
     # ---- diarizers ----
@@ -139,7 +155,19 @@ def main() -> int:
     # ---- summary ----
     header("Что у тебя получится по умолчанию")
 
-    if has_mlx:
+    # Приоритет в transcribe.py: whisper-cpp → mlx-whisper → faster-whisper.
+    if wcpp_usable:
+        if wcpp_has_turbo and wcpp_has_v3:
+            print("  • Транскрипция: whisper.cpp + turbo и large-v3 (все пресеты доступны).")
+        elif wcpp_has_turbo:
+            print("  • Транскрипция: whisper.cpp + large-v3-turbo (пресеты fast/balanced).")
+            print("                  Для quality нужен large-v3 — докачать:")
+            print("                    cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3")
+        else:
+            print("  • Транскрипция: whisper.cpp + large-v3 (пресет quality).")
+            print("                  Fast/balanced будут крутить large-v3 — медленнее. Для штатного fast докачать:")
+            print("                    cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo")
+    elif has_mlx:
         print("  • Транскрипция: mlx-whisper (быстро, ~RTF 0.10 на M-серии).")
     elif has_fw:
         print("  • Транскрипция: faster-whisper (CPU, ~RTF 0.40 на M-серии).")
@@ -279,7 +307,7 @@ HF_TOKEN полностью бесплатный — это просто спо�
     fast      — длинная запись для черновика, пересмотр перед удалением
 """)
 
-    return 0 if (has_ffmpeg and (has_fw or has_mlx)) else 1
+    return 0 if (has_ffmpeg and (wcpp_usable or has_fw or has_mlx)) else 1
 
 
 if __name__ == "__main__":
