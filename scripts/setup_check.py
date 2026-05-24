@@ -164,8 +164,9 @@ def main() -> int:
             print("                  Для quality нужен large-v3 — докачать:")
             print("                    cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3")
         else:
-            print("  • Транскрипция: whisper.cpp + large-v3 (пресет quality).")
-            print("                  Fast/balanced будут крутить large-v3 — медленнее. Для штатного fast докачать:")
+            print("  • Транскрипция: whisper.cpp + large-v3 (только пресет quality).")
+            print("                  Fast/balanced не запустятся без large-v3-turbo — transcribe.py")
+            print("                  жёстко требует ggml-large-v3-turbo.bin для этих пресетов. Докачать:")
             print("                    cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo")
     elif has_mlx:
         print("  • Транскрипция: mlx-whisper (быстро, ~RTF 0.10 на M-серии).")
