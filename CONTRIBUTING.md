@@ -12,9 +12,19 @@ PR'ы приветствуются — особенно тесты на корн
 2. Активируй venv (`source ~/.venvs/whisper/bin/activate`) и проверь окружение:
    `python scripts/setup_check.py` — wizard покажет, что установлено и чего
    не хватает.
-3. Для разработки клонируй репо в произвольную папку, а не в `~/.claude/skills/`.
-   На время работы можно сделать симлинк: `ln -s ~/path/to/clone
-   ~/.claude/skills/meeting-transcribe` — Claude Code подхватит.
+3. Для разработки клонируй репо в произвольную папку, а не в `~/.claude/skills/`
+   или `~/.agents/skills/`. На время работы сделай симлинк в нужную локацию:
+
+   ```bash
+   # Claude Code
+   ln -s "$(pwd)" ~/.claude/skills/meeting-transcribe
+
+   # OpenAI Codex CLI
+   ln -s "$(pwd)" ~/.agents/skills/meeting-transcribe
+   ```
+
+   Линкуй в обе локации, если тестируешь оба CLI — это один и тот же `SKILL.md`,
+   оба агента читают его одинаково.
 
 ## Что мы ценим в PR
 
@@ -42,7 +52,7 @@ PR'ы приветствуются — особенно тесты на корн
 - Cloud-ASR (Whisper API, AssemblyAI, etc.) — намеренно. Скилл локальный,
   без сети после загрузки моделей.
 - Live-стриминг (real-time) — другой профиль задач.
-- UI/виджеты — скилл предназначен под текстовый интерфейс Claude Code.
+- UI/виджеты — скилл предназначен под текстовый интерфейс агентного CLI (Claude Code, Codex и совместимые).
 
 ## Issues
 

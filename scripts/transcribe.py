@@ -1050,7 +1050,7 @@ def build_estimate_report(duration: float, env: dict, diarizer: Optional[str]) -
 
 
 def print_estimate_table(report: dict) -> None:
-    """Красивая табличка для человека или Claude."""
+    """Красивая табличка для человека или агента."""
     print()
     print(f"📂 Длительность: {report['duration_hms']}")
     if report["diarizer"]:
