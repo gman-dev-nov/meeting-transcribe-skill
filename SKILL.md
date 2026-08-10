@@ -1,6 +1,6 @@
 ---
 name: meeting-transcribe
-description: Use this skill whenever the user has a video/audio recording (.mp4, .mov, .mkv, .webm, .m4a, .mp3, .wav, .flac, .ogg) of a meeting, call, interview, or lecture and wants a transcript, summary, action items, decisions, quotes, risks, or insights — especially Russian-language calls (созвоны, встречи, интервью). Trigger phrases include 'транскрибируй', 'расшифруй созвон', 'саммари со встречи', 'выпиши решения и action items', 'разбери митинг', 'transcribe this meeting', 'summarize this call'. Runs local Whisper (whisper.cpp / mlx-whisper / faster-whisper) with selectable speed/quality presets, then produces a structured Russian-language report with TL;DR, topics, decisions, action items, quotes, risks, and follow-ups. Optional speaker diarization via pyannote (needs free HF_TOKEN) or resemblyzer (fully local). Trigger even if user only mentions a file path — they almost always want analysis. Do NOT trigger for short voice notes.
+description: Use this skill whenever the user has a video/audio recording (.mp4, .mov, .mkv, .webm, .m4a, .mp3, .wav, .flac, .ogg, .aifc) of a meeting, call, interview, or lecture and wants a transcript, summary, action items, decisions, quotes, risks, or insights — especially Russian-language calls (созвоны, встречи, интервью). Trigger phrases include 'транскрибируй', 'расшифруй созвон', 'саммари со встречи', 'выпиши решения и action items', 'разбери митинг', 'transcribe this meeting', 'summarize this call', 'gigaam'. For Russian-language recordings runs GigaAM v3 (Sber's Russian ASR: ~3-4x faster than Whisper large-v3, zero silence hallucinations, native punctuation; Silero VAD chunking, no HF token) with local Whisper (whisper.cpp / mlx-whisper / faster-whisper) as cross-check for English terms; for other languages runs Whisper with selectable speed/quality presets. Then produces a structured Russian-language report with TL;DR, topics, decisions, action items, quotes, risks, and follow-ups. Optional speaker diarization via pyannote (needs free HF_TOKEN) or resemblyzer (fully local). Trigger even if user only mentions a file path — they almost always want analysis. Do NOT trigger for short voice notes.
 ---
 
 # Meeting Transcribe
@@ -23,6 +23,33 @@ description: Use this skill whenever the user has a video/audio recording (.mp4,
 
 Бэкенд выбирается автоматически в порядке: `whisper-cpp` → `mlx-whisper` → `faster-whisper`. Детали и сравнение — в `references/backends.md`. Установка — в `references/setup.md`.
 
+## Выбор движка: GigaAM или Whisper
+
+**Для русскоязычных записей дефолт — GigaAM v3** (`v3_e2e_rnnt`, официальный пакет Сбера): в 3–4 раза быстрее `large-v3`, ноль галлюцинаций на тишине в наших сравнениях (у Whisper — 6 на созвоне с 57% тишины и 125 на корпусе лекций), нативная пунктуация и заглавные. Слабое место — англицизмы транслитерируются на слух («гардрейл», «флогенты» вместо guardrail, Langflow). Цифры сравнений — в `references/backends.md`.
+
+Whisper остаётся нужен:
+- для нерусских записей и записей с большой долей английской речи;
+- вторым проходом для сверки английских терминов и когда нужен гранулярный `.srt`;
+- если GigaAM не установлен, а пользователь не хочет его ставить.
+
+Если пользователь не назвал движок явно: русская запись → GigaAM (когда установлен — или предложи поставить, см. `references/setup.md` → «GigaAM v3»), иначе — Whisper-workflow ниже.
+
+### Транскрипция через GigaAM
+
+```bash
+~/.venvs/asr/bin/python scripts/gigaam_longform.py "<путь>" --device mps   # CUDA: --device cuda, CPU: --device cpu
+```
+
+**Запускай интерпретатором того venv, где установлен gigaam** (по `references/setup.md` это `~/.venvs/asr`; если venv в другом месте — подставь его путь). Голый `python` вне venv упадёт с `ModuleNotFoundError: torch`.
+
+Скрипт сам нарезает запись Silero VAD-ом по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка — 30 сек) — HF-токен не нужен: в свежих версиях gigaam используется штатный `vad_backend="silero"`, в старых скрипт подменяет VAD самостоятельно. Артефакты те же: `<имя>.transcript.{json,md,srt}` рядом с записью — дальше шаги 4–6 Whisper-workflow (чтение транскрипта → отчёт по шаблону → сохранение).
+
+### Гибридная схема (для важных записей)
+
+Если по записи будут приниматься решения — GigaAM как основа, Whisper (`quality`) параллельным вторым прогоном:
+- ключевые решения сверяй между транскриптами дословно — в наших сравнениях это ловило и «правдоподобную неправду» Whisper («Rails» вместо Wails, «агент-регистратор» вместо оркестратора), и потерянное отрицание у GigaAM, разворачивавшее смысл решения;
+- написание английских терминов бери из Whisper-версии, основную ткань текста — из GigaAM.
+
 ## Когда включать диаризацию
 
 **По умолчанию НЕ включай `--diarize`.** Запускай только если:
@@ -35,7 +62,9 @@ description: Use this skill whenever the user has a video/audio recording (.mp4,
 
 Выбор диаризатора: pyannote (точнее, нужен `HF_TOKEN`) или resemblyzer (fallback, без токенов). Скрипт сам выберет `pyannote`, если токен есть. Подробности — в `references/setup.md` и `references/backends.md`.
 
-## Workflow
+## Workflow (Whisper)
+
+Шаги 0–3 — специфика Whisper; шаги 4–6 общие для обоих движков (GigaAM-путь описан выше).
 
 ### Шаг 0. Проверить окружение (только при первом запуске)
 
@@ -152,7 +181,8 @@ python scripts/transcribe.py "<путь>" \
 
 ## Файлы скилла
 
-- `scripts/transcribe.py` — основной скрипт.
+- `scripts/transcribe.py` — основной скрипт (Whisper).
+- `scripts/gigaam_longform.py` — транскрипция через GigaAM v3 (Silero VAD, без HF-токена).
 - `scripts/setup_check.py` — wizard окружения.
 - `references/setup.md` — установка ffmpeg, Python, whisper.cpp, HF_TOKEN.
 - `references/backends.md` — детали бэкендов, моделей, пресетов, диаризаторов.

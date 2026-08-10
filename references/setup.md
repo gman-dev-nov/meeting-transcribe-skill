@@ -8,7 +8,7 @@
 
 ```bash
 # 1. ffmpeg
-brew install ffmpeg              # или скачай со сборкой evermeet.cx → положи в /usr/local/bin/
+brew install ffmpeg              # без Homebrew — см. «ffmpeg без Homebrew» ниже
 
 # 2. whisper.cpp + Metal
 pip install cmake                # если нет
@@ -32,6 +32,37 @@ pip install resemblyzer scikit-learn
 Скилл найдёт whisper.cpp автоматически по путям: `$WHISPER_CPP_HOME`, `~/whisper.cpp/`, `~/.local/share/whisper.cpp/`, или через `whisper-cli` в `$PATH`. Если нестандартное место — выстави `export WHISPER_CPP_HOME=/path/to/whisper.cpp`.
 
 Проверка: `python scripts/setup_check.py` — wizard покажет, всё ли на месте.
+
+### ffmpeg без Homebrew
+
+Если brew нет и ставить его не хочется — статические бинарники в `~/.local/bin` (проверено на чистой машине без brew/cmake):
+
+```bash
+mkdir -p ~/.local/bin
+# Статические сборки ffmpeg И ffprobe (нужны оба):
+#   arm64: https://www.osxexperts.net
+#   x86_64 (или Rosetta): https://evermeet.cx/ffmpeg/
+# Распакуй оба бинарника в ~/.local/bin, затем:
+chmod +x ~/.local/bin/ffmpeg ~/.local/bin/ffprobe
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+`cmake` для сборки whisper.cpp тоже ставится без brew: `pip install cmake` (уже в инструкции выше).
+
+## GigaAM v3 (рекомендуется для русских записей)
+
+Официальный пакет Сбера. **PyPI-пакет `gigaam` отстаёт от GitHub** (в нём нет v3-чекпоинтов) — ставить только с GitHub:
+
+```bash
+python3 -m venv ~/.venvs/asr && source ~/.venvs/asr/bin/activate
+pip install --upgrade pip
+pip install "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git"
+pip install silero-vad
+```
+
+Запуск (интерпретатором этого venv — вне активированного venv пиши путь явно): `~/.venvs/asr/bin/python scripts/gigaam_longform.py "запись.m4a" --device mps` (CUDA: `--device cuda`, без GPU: `--device cpu`). Чекпоинт `v3_e2e_rnnt` (~0.4 ГБ) скачается при первом запуске.
+
+HF-токен НЕ нужен: нарезку по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка 30 сек) делает локальный Silero VAD — в свежих версиях gigaam штатно (`vad_backend="silero"`), в старых `gigaam_longform.py` подменяет VAD сам. ffmpeg нужен и здесь (декодирование аудио).
 
 ### Какую модель выбрать и как докачать вторую
 

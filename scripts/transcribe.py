@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Optional
 
 
-AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".aac"}
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".aac", ".aif", ".aiff", ".aifc"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
 
@@ -157,15 +157,11 @@ def fmt_ts(seconds: float) -> str:
 
 
 def fmt_ts_srt(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds - int(seconds)) * 1000))
-    if ms == 1000:
-        ms = 0
-        s += 1
+    # Через целые миллисекунды: округление 59.9996 → 60.0 не даст «00:00:60,000»
+    total_ms = max(0, int(round(seconds * 1000)))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -174,7 +170,9 @@ def check_ffmpeg() -> None:
         print(
             "ERROR: ffmpeg не найден в PATH.\n"
             "  brew install ffmpeg     # macOS\n"
-            "  sudo apt install ffmpeg # Linux",
+            "  sudo apt install ffmpeg # Linux\n"
+            "  без Homebrew: статические ffmpeg+ffprobe → ~/.local/bin"
+            " (references/setup.md → «ffmpeg без Homebrew»)",
             file=sys.stderr,
         )
         sys.exit(1)

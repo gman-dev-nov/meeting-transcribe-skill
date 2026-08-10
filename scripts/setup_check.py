@@ -48,7 +48,9 @@ def main() -> int:
     print("\n1) ffmpeg")
     has_ffmpeg = shutil.which("ffmpeg") is not None
     check("ffmpeg в PATH", has_ffmpeg,
-          "macOS: brew install ffmpeg | Linux: sudo apt install ffmpeg")
+          "macOS: brew install ffmpeg | Linux: sudo apt install ffmpeg | "
+          "без brew: статические ffmpeg+ffprobe → ~/.local/bin "
+          "(references/setup.md → «ffmpeg без Homebrew»)")
 
     # ---- whisper backends ----
     print("\n2) Whisper-бэкенды")
