@@ -1,0 +1,848 @@
+{
+ "version": 1,
+ "source": "извлечено из ручной сверки 6 лекций AI Agents Security Week (37669 слов, 379 правок)",
+ "terms": [
+  {
+   "canonical": "Actions",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "экшенс"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "alignment",
+   "policy": "auto",
+   "ru_stems": [
+    "элаймент"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "alinements"
+   ],
+   "latin_suggest": [
+    "Aliment"
+   ]
+  },
+  {
+   "canonical": "Anthropic",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Antropik"
+   ]
+  },
+  {
+   "canonical": "anything",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "дунисингу",
+    "энисингоу"
+   ],
+   "latin_variants": [
+    "anising",
+    "anyting"
+   ]
+  },
+  {
+   "canonical": "API",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "апишку",
+    "аппи",
+    "аппы",
+    "аппе"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "bash-скрипт",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Bashript"
+   ]
+  },
+  {
+   "canonical": "blue teaming",
+   "policy": "auto",
+   "ru_stems": [
+    "блютим"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "capabilities",
+   "policy": "auto",
+   "ru_stems": [
+    "капилитис"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "compliance",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "complience"
+   ]
+  },
+  {
+   "canonical": "constitutional",
+   "policy": "auto",
+   "ru_stems": [
+    "конститушне"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "context",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Compex"
+   ]
+  },
+  {
+   "canonical": "control",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Controw"
+   ]
+  },
+  {
+   "canonical": "CPU",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "цпу"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "data minimization",
+   "policy": "auto",
+   "ru_stems": [
+    "дата-минимизейшн"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "DeepSeek",
+   "policy": "auto",
+   "ru_stems": [
+    "дипсик"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "DepSIK"
+   ]
+  },
+  {
+   "canonical": "defenses",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Deffences"
+   ]
+  },
+  {
+   "canonical": "dependency",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Dependity"
+   ]
+  },
+  {
+   "canonical": "DevSecOps",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Defseck"
+   ]
+  },
+  {
+   "canonical": "diffusion",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Difusion"
+   ]
+  },
+  {
+   "canonical": "endpoint",
+   "policy": "auto",
+   "ru_stems": [
+    "андпойнт",
+    "анпоинт"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "inpoint"
+   ]
+  },
+  {
+   "canonical": "feedback",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "fidback"
+   ]
+  },
+  {
+   "canonical": "fine-tuning",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "finetuning"
+   ]
+  },
+  {
+   "canonical": "garbage",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "гарбачин"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "GitHub",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Geathab",
+    "Githab"
+   ]
+  },
+  {
+   "canonical": "graph",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Graf"
+   ],
+   "latin_suggest": [
+    "graff"
+   ]
+  },
+  {
+   "canonical": "Grok",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "грок",
+    "крок"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "guard",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Gard",
+    "Gart"
+   ]
+  },
+  {
+   "canonical": "guardrail",
+   "policy": "auto",
+   "ru_stems": [
+    "гардрейл",
+    "гвардрейл",
+    "квартрейл",
+    "гард-рейл"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "guardrails",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Gardrales"
+   ]
+  },
+  {
+   "canonical": "guidance",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Gidence",
+    "Gidens",
+    "gidence"
+   ]
+  },
+  {
+   "canonical": "harmlessness",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Arblessness",
+    "Armlessness"
+   ],
+   "latin_suggest": [
+    "arles"
+   ]
+  },
+  {
+   "canonical": "helpfulness",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Healplines",
+    "Helpness",
+    "Helpunes"
+   ]
+  },
+  {
+   "canonical": "honest",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "onest"
+   ]
+  },
+  {
+   "canonical": "honeypot",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Honneypot"
+   ]
+  },
+  {
+   "canonical": "input",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Impoot",
+    "Imputgla"
+   ],
+   "latin_suggest": [
+    "Impot"
+   ]
+  },
+  {
+   "canonical": "Jira",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "джира",
+    "джиру"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "JSON",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "джисон",
+    "джисона"
+   ],
+   "latin_variants": [
+    "J-Son",
+    "Jayson"
+   ]
+  },
+  {
+   "canonical": "judge",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "заджадж"
+   ],
+   "latin_variants": [
+    "Jadge",
+    "Jage",
+    "ajage",
+    "jadge"
+   ]
+  },
+  {
+   "canonical": "kill switch",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Killswitch"
+   ]
+  },
+  {
+   "canonical": "Labs",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Laps"
+   ]
+  },
+  {
+   "canonical": "learning",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Lurning",
+    "lurning"
+   ]
+  },
+  {
+   "canonical": "lifecycle",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Lifescie",
+    "Lifesikle"
+   ]
+  },
+  {
+   "canonical": "LLM",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "лм",
+    "лмка",
+    "лмки",
+    "лмок",
+    "lm",
+    "lms",
+    "lmка"
+   ],
+   "latin_variants": [
+    "LM",
+    "LMS"
+   ]
+  },
+  {
+   "canonical": "LLM-as-a-judge",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "LMJ"
+   ]
+  },
+  {
+   "canonical": "logit",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [],
+   "latin_suggest": [
+    "Logie"
+   ]
+  },
+  {
+   "canonical": "MITRE",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "митра",
+    "митре"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "model",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Modul"
+   ]
+  },
+  {
+   "canonical": "NIST",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "нист",
+    "ниста"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "npm",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "NPN"
+   ]
+  },
+  {
+   "canonical": "NSFW",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "нсф"
+   ],
+   "latin_variants": [
+    "NSF"
+   ]
+  },
+  {
+   "canonical": "open source",
+   "policy": "auto",
+   "ru_stems": [
+    "опенсорс",
+    "опенсерс"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "Opensorce",
+    "Opensors"
+   ]
+  },
+  {
+   "canonical": "OpenAI",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "APopen",
+    "Openi"
+   ]
+  },
+  {
+   "canonical": "optimization",
+   "policy": "auto",
+   "ru_stems": [
+    "оптимизейшн"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "optimisation"
+   ]
+  },
+  {
+   "canonical": "output",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Woldpoot"
+   ]
+  },
+  {
+   "canonical": "privilege",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Privilach",
+    "Privoloch"
+   ]
+  },
+  {
+   "canonical": "prompt",
+   "policy": "auto",
+   "ru_stems": [
+    "пронт",
+    "промт"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "prompt injection",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Prometenjection"
+   ]
+  },
+  {
+   "canonical": "Promptfoo",
+   "policy": "auto",
+   "ru_stems": [
+    "промтьфу"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "pull request",
+   "policy": "auto",
+   "ru_stems": [
+    "пул-реквест",
+    "пулреквест",
+    "полреквест"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "PyRIT",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "пайит"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "RAG",
+   "policy": "suggest",
+   "ru_stems": [],
+   "ru_exact": [
+    "рага",
+    "рагом",
+    "рагу"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "read-only",
+   "policy": "auto",
+   "ru_stems": [
+    "редонли",
+    "редон-ли"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "reasoning",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "resaning"
+   ]
+  },
+  {
+   "canonical": "red teaming",
+   "policy": "auto",
+   "ru_stems": [
+    "ретиминг",
+    "рэттиминг",
+    "редтиминг"
+   ],
+   "ru_exact": [],
+   "latin_variants": [
+    "Rediming",
+    "Redtim",
+    "Retteam"
+   ]
+  },
+  {
+   "canonical": "regex",
+   "policy": "auto",
+   "ru_stems": [
+    "регекс"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "registry",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Regestry",
+    "reggestry"
+   ]
+  },
+  {
+   "canonical": "representation",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "reprezentation"
+   ]
+  },
+  {
+   "canonical": "request",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Recest"
+   ]
+  },
+  {
+   "canonical": "retrieval",
+   "policy": "auto",
+   "ru_stems": [
+    "ретривер"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "reward",
+   "policy": "auto",
+   "ru_stems": [
+    "реворд"
+   ],
+   "ru_exact": [],
+   "latin_variants": [],
+   "latin_suggest": [
+    "Reword"
+   ]
+  },
+  {
+   "canonical": "roadmap",
+   "policy": "auto",
+   "ru_stems": [
+    "родмаб"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "RSA",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "рсэ"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "sandbox",
+   "policy": "auto",
+   "ru_stems": [
+    "сэнбокс"
+   ],
+   "ru_exact": [],
+   "latin_variants": []
+  },
+  {
+   "canonical": "SDLC",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [
+    "сдлц"
+   ],
+   "latin_variants": []
+  },
+  {
+   "canonical": "Shodan",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Shoden",
+    "shoden"
+   ]
+  },
+  {
+   "canonical": "sneaky prompt",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "SnickePromt"
+   ]
+  },
+  {
+   "canonical": "softmax",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "SofMax"
+   ]
+  },
+  {
+   "canonical": "software",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Softord"
+   ]
+  },
+  {
+   "canonical": "SourceCraft",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Sorrscraft",
+    "Sortcraft",
+    "Surscraft",
+    "Surstraft"
+   ]
+  },
+  {
+   "canonical": "tool",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "tull"
+   ]
+  },
+  {
+   "canonical": "Toolgate",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Toolgard"
+   ]
+  },
+  {
+   "canonical": "workflow",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Workflo",
+    "work-flow"
+   ]
+  },
+  {
+   "canonical": "zero trust",
+   "policy": "auto",
+   "ru_stems": [],
+   "ru_exact": [],
+   "latin_variants": [
+    "Zerotrast",
+    "Zirotrast"
+   ]
+  }
+ ],
+ "note": "latin_suggest — искажения, совпадающие с реальными английскими словами: в этом домене они почти наверняка ошибки, но автоматически не заменяются, потому что на другой записи то же слово может быть употреблено по назначению"
+}
