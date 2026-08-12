@@ -627,8 +627,14 @@ def transcribe_whisper_cpp(
         ]
         if initial_prompt:
             cmd.extend(["--prompt", initial_prompt])
-        if word_timestamps:
-            cmd.append("-otoken")  # token-level (closest to word-level)
+        # Слов-уровень НЕ требует отдельного флага: `-ojf` уже кладёт в JSON
+        # per-token `{text, p, offsets}`, из которых слова собираются в
+        # _tokens_to_words(). Раньше здесь добавлялся `-otoken` — такого флага
+        # в whisper-cli нет, а на неизвестном аргументе он печатает usage и
+        # делает exit(0) (examples/cli/cli.cpp:225-227), то есть возвращает код
+        # УСПЕХА. Проверка returncode это не ловила, и путь --diarize с pyannote
+        # (transcribe.py:1256 включает word_timestamps) падал позже на
+        # отсутствующем JSON.
         if not condition_on_previous_text:
             # --max-context 0: запрещает прокидывать предыдущий текст как promt в новое окно.
             # Лечит залипания вида «Так./Видно?» после длинных тишин — критично для
@@ -640,6 +646,16 @@ def transcribe_whisper_cpp(
         if proc.returncode != 0:
             print(
                 f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-2000:]}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # whisper-cli выходит с кодом 0 и на ошибках разбора аргументов, поэтому
+        # returncode недостаточно — ловим usage-выхлоп явно.
+        if "error: unknown argument" in proc.stderr:
+            bad = proc.stderr.split("error: unknown argument:", 1)[1].splitlines()[0].strip()
+            print(
+                f"ERROR: whisper-cli не понял аргумент {bad!r} (вышел с кодом 0).\n"
+                f"Версия whisper.cpp несовместима с командой, собранной скриптом.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -663,8 +679,56 @@ def transcribe_whisper_cpp(
         text = s.get("text", "").strip()
         if not text:
             continue
-        out.append(Segment(start=start_ms / 1000.0, end=end_ms / 1000.0, text=text))
+        words = _tokens_to_words(s.get("tokens") or []) if word_timestamps else []
+        out.append(
+            Segment(start=start_ms / 1000.0, end=end_ms / 1000.0, text=text, words=words)
+        )
     return out
+
+
+def _tokens_to_words(tokens: list) -> list[dict]:
+    """Собрать слова из per-token вывода whisper.cpp (`-ojf`).
+
+    whisper.cpp отдаёт BPE-куски; новое слово начинается с куска, у которого
+    текст стартует с пробела. Служебные маркеры (`[_BEG_]`, `[_TT_123]`) текста
+    не несут и пропускаются. Уверенность слова — среднее `p` его токенов;
+    она нужна гибридной сверке, чтобы ранжировать спорные места.
+    """
+    words: list[dict] = []
+    cur_text = ""
+    cur_start: Optional[int] = None
+    cur_end: Optional[int] = None
+    cur_probs: list[float] = []
+
+    def commit() -> None:
+        nonlocal cur_text, cur_start, cur_end, cur_probs
+        text = cur_text.strip()
+        if text and cur_start is not None:
+            words.append({
+                "start": round(cur_start / 1000.0, 3),
+                "end": round((cur_end if cur_end is not None else cur_start) / 1000.0, 3),
+                "word": text,
+                "conf": round(sum(cur_probs) / len(cur_probs), 4) if cur_probs else None,
+            })
+        cur_text, cur_start, cur_end, cur_probs = "", None, None, []
+
+    for tok in tokens:
+        text = tok.get("text", "")
+        if text.startswith("[_") and text.endswith("]"):
+            continue
+        if text.startswith(" ") and cur_text:
+            commit()
+        offs = tok.get("offsets") or {}
+        if cur_start is None:
+            cur_start = offs.get("from", 0)
+        cur_end = offs.get("to", cur_end)
+        cur_text += text
+        p = tok.get("p")
+        if isinstance(p, (int, float)):
+            cur_probs.append(float(p))
+
+    commit()
+    return words
 
 
 def transcribe_mlx_whisper(
