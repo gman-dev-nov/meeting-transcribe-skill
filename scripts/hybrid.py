@@ -225,6 +225,155 @@ def normalize_text(text: str, lex: Lexicon, sink: list) -> str:
     return "".join(parts)
 
 
+# -------------- ДЕТЕКТОР ПОДОЗРИТЕЛЬНЫХ МЕСТ --------------
+
+# Латинские токены, которые GigaAM пишет верно: помечать их — шум.
+LATIN_OK = {
+    "llm", "gpt", "mcp", "http", "https", "api", "ai", "rag", "ci", "cd", "ui", "ux",
+    "sql", "json", "yaml", "xml", "html", "css", "js", "ts", "url", "pdf", "csv",
+    "gpu", "cpu", "ram", "sdk", "ide", "os", "vpn", "dns", "ssh", "tls", "jwt",
+    "gigachat", "github", "openai", "docker", "kubernetes", "python", "java", "go",
+    "react", "typescript", "linux", "windows", "macos", "ios", "android", "aws",
+}
+# Филлеры и разговорные обрывки — не ошибки распознавания.
+FILLERS = {
+    "ну", "вот", "это", "как", "бы", "типа", "щас", "че", "чё", "ага", "угу", "мм",
+    "хмм", "нда", "э", "эм", "а", "и", "но", "да", "нет", "так", "там", "то",
+}
+
+MIXED_SCRIPT = re.compile(r"(?=.*[а-яёА-ЯЁ])(?=.*[A-Za-z])")
+HAS_DIGIT = re.compile(r"\d")
+
+
+def detect_signals(word: str, conf: Optional[float], low_cut: Optional[float],
+                   very_low_cut: Optional[float], lex: Lexicon) -> tuple[int, list[str]]:
+    """Вернуть (вес, список сигналов) для одного слова."""
+    _, core, _ = split_edges(word)
+    if not core:
+        return 0, []
+    low = norm_ru(core)
+    if low in FILLERS or len(core) < 4:
+        return 0, []
+    # То, что уже чинится словарём, кандидатом не является.
+    canonical, reason = lex.match(core)
+    if canonical and not reason.startswith("suggest:"):
+        return 0, []
+
+    score, signals = 0, []
+    mixed = re.search(r"[а-яёА-ЯЁ]", core) and re.search(r"[A-Za-z]", core)
+    if mixed:
+        # «MCP-сервер», «SSH-серверу», «LLM-модель» — законные сложные слова:
+        # известный акроним латиницей плюс русское слово через дефис. Помечать
+        # их значит топить отчёт в шуме. Подозрительно другое: либо акроним
+        # неизвестен («NSF-контент», «I-продукта»), либо алфавиты смешаны
+        # ВНУТРИ одной части слова («имaдж» с латинской a) — это гомоглиф,
+        # и он всегда сбой.
+        chunks = [c for c in re.split(r"[-–—]", core) if c]
+        homoglyph = any(
+            re.search(r"[а-яёА-ЯЁ]", c) and re.search(r"[A-Za-z]", c) for c in chunks
+        )
+        unknown_acronym = any(
+            re.fullmatch(r"[A-Za-z]+", c) and norm_ru(c) not in LATIN_OK for c in chunks
+        )
+        if homoglyph:
+            score += 4
+            signals.append("M")      # алфавиты смешаны внутри одной части слова
+        elif unknown_acronym:
+            score += 2
+            signals.append("M-")     # акроним не из белого списка
+    elif re.fullmatch(r"[A-Za-z][A-Za-z.-]*", core):
+        if low not in LATIN_OK:
+            score += 2
+            signals.append("L")      # латиница вне белого списка
+            if low not in ENGLISH_WORDS:
+                score += 1
+                signals.append("L+")  # и слова такого в английском нет
+    if reason.startswith("suggest:"):
+        score += 3
+        signals.append("S")          # омоним из словаря, решение за человеком
+    if conf is not None and very_low_cut is not None and conf <= very_low_cut:
+        score += 2
+        signals.append("C")          # уверенность в нижних процентах
+    elif conf is not None and low_cut is not None and conf <= low_cut:
+        score += 1
+        signals.append("C-")
+    if HAS_DIGIT.search(core) and conf is not None and low_cut is not None and conf <= low_cut:
+        score += 1
+        signals.append("N")          # число под сомнением
+    return score, signals
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    src = args.transcript.expanduser().resolve()
+    data = json.loads(src.read_text(encoding="utf-8"))
+    lex = Lexicon(json.loads(args.lexicon.expanduser().read_text(encoding="utf-8")))
+
+    words: list[dict] = []
+    for seg in data.get("segments", []):
+        for word in seg.get("words") or []:
+            words.append({"word": word.get("word", ""), "start": word.get("start", seg.get("start", 0.0)),
+                          "conf": word.get("conf")})
+        if not (seg.get("words") or []):
+            for token in seg.get("text", "").split():
+                words.append({"word": token, "start": seg.get("start", 0.0), "conf": seg.get("conf")})
+
+    confs = sorted(w["conf"] for w in words if w["conf"] is not None)
+    low_cut = confs[int(len(confs) * 0.15)] if confs else None
+    very_low_cut = confs[int(len(confs) * 0.05)] if confs else None
+    if not confs:
+        print("! в транскрипте нет поля conf — канал уверенности выключен", file=sys.stderr)
+
+    # Кластеры вариантов: разные написания с одинаковым согласным скелетом.
+    skeleton = lambda s: re.sub(r"[аеиоуыэюяaeiouy\W_]", "", norm_ru(s))
+    by_skel: dict[str, set[str]] = {}
+    for w in words:
+        _, core, _ = split_edges(w["word"])
+        if len(core) >= 5:
+            by_skel.setdefault(skeleton(core), set()).add(norm_ru(core))
+
+    candidates = []
+    for w in words:
+        score, signals = detect_signals(w["word"], w["conf"], low_cut, very_low_cut, lex)
+        if not score:
+            continue
+        _, core, _ = split_edges(w["word"])
+        variants = by_skel.get(skeleton(core), set())
+        if len(variants) > 1:
+            score += 3
+            signals.append("V")      # тот же термин записан по-разному
+        candidates.append({"at": fmt_ts(w["start"]), "start": w["start"], "word": core,
+                           "conf": w["conf"], "score": score, "signals": signals,
+                           "variants": sorted(variants) if len(variants) > 1 else []})
+
+    # Один термин — одна строка. Иначе «MCP-сервер», встретившийся 10 раз,
+    # занимает весь бюджет и вытесняет остальные находки.
+    grouped: dict[str, dict] = {}
+    for c in candidates:
+        key = norm_ru(c["word"])
+        if key in grouped:
+            grouped[key]["count"] += 1
+        else:
+            grouped[key] = {**c, "count": 1}
+    candidates = sorted(grouped.values(), key=lambda c: (-c["score"], -c["count"], c["start"]))
+    top = candidates[: args.budget]
+
+    print(f"слов: {len(words)}   кандидатов: {len(candidates)}   в бюджете: {len(top)}")
+    if confs:
+        print(f"порог уверенности: p05={very_low_cut:.4f}  p15={low_cut:.4f}")
+    print(f"\n{'время':>9s} {'вес':>4s} {'×':>3s} {'conf':>7s}  сигналы     слово")
+    for c in top:
+        conf = f"{c['conf']:.4f}" if c["conf"] is not None else "  —  "
+        marks = ",".join(c["signals"])
+        extra = f"   ← варианты: {', '.join(c['variants'])}" if c["variants"] else ""
+        print(f"{c['at']:>9s} {c['score']:>4d} {c['count']:>3d} {conf:>7s}  "
+              f"{marks:<11s} {c['word']}{extra}")
+
+    if args.json_out:
+        args.json_out.write_text(json.dumps(top, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n→ {args.json_out}")
+    return 0
+
+
 def cmd_normalize(args: argparse.Namespace) -> int:
     src = args.transcript.expanduser().resolve()
     data = json.loads(src.read_text(encoding="utf-8"))
@@ -294,6 +443,14 @@ def main() -> int:
     norm.add_argument("--dry-run", action="store_true",
                       help="показать, что изменится, не трогая файлы")
     norm.set_defaults(func=cmd_normalize)
+
+    plan = sub.add_parser("plan", help="найти места, которые словарь не чинит")
+    plan.add_argument("transcript", type=Path)
+    plan.add_argument("--lexicon", type=Path, default=DEFAULT_LEXICON)
+    plan.add_argument("--budget", type=int, default=40,
+                      help="сколько кандидатов оставить (по убыванию веса)")
+    plan.add_argument("--json-out", type=Path, default=None)
+    plan.set_defaults(func=cmd_plan)
 
     args = ap.parse_args()
     return args.func(args)
