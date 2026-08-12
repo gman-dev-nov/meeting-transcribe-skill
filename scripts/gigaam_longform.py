@@ -175,20 +175,38 @@ def main() -> int:
     result = model.transcribe_longform(str(src), **lf_kwargs)
     elapsed = time.time() - started
 
+    def _conf(obj) -> float | None:
+        """Уверенность декодирования, если её отдаёт установленный gigaam.
+
+        Появилась в gigaam на ветке feat/token-confidence (PR salute-developers/GigaAM#86)
+        как Word.confidence / Segment.confidence = exp(mean(log p)). На апстримном
+        0.2.0 атрибута нет — тогда канал молча отключается, и гибридная сверка
+        просто не использует этот сигнал.
+        """
+        value = getattr(obj, "confidence", None)
+        return round(value, 4) if isinstance(value, (int, float)) else None
+
     segments = [
         {
             "start": round(s.start, 3),
             "end": round(s.end, 3),
             "text": s.text.strip(),
             "speaker": None,
+            "conf": _conf(s),
             "words": [
-                {"start": round(w.start, 3), "end": round(w.end, 3), "word": w.text}
+                {
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3),
+                    "word": w.text,
+                    "conf": _conf(w),
+                }
                 for w in (s.words or [])
             ],
         }
         for s in result.segments
         if s.text.strip()
     ]
+    has_confidence = any(s["conf"] is not None for s in segments)
     duration = segments[-1]["end"] if segments else 0.0
 
     meta = {
@@ -204,6 +222,7 @@ def main() -> int:
         "elapsed_hms": fmt_ts(elapsed),
         "rtf_actual": round(elapsed / duration, 3) if duration else None,
         "segments_count": len(segments),
+        "has_confidence": has_confidence,
     }
 
     json_path = out_dir / f"{stem}.transcript.json"
