@@ -1,6 +1,6 @@
 ---
 name: meeting-transcribe
-description: Use this skill whenever the user has a video/audio recording (.mp4, .mov, .mkv, .webm, .m4a, .mp3, .wav, .flac, .ogg, .aifc) of a meeting, call, interview, or lecture and wants a transcript, summary, action items, decisions, quotes, risks, or insights — especially Russian-language calls (созвоны, встречи, интервью). Trigger phrases include 'транскрибируй', 'расшифруй созвон', 'саммари со встречи', 'выпиши решения и action items', 'разбери митинг', 'transcribe this meeting', 'summarize this call', 'gigaam'. For Russian-language recordings runs GigaAM v3 (Sber's Russian ASR: ~3-4x faster than Whisper large-v3, zero silence hallucinations, native punctuation; Silero VAD chunking, no HF token) with local Whisper (whisper.cpp / mlx-whisper / faster-whisper) as cross-check for English terms; for other languages runs Whisper with selectable speed/quality presets. Then produces a structured Russian-language report with TL;DR, topics, decisions, action items, quotes, risks, and follow-ups. Optional speaker diarization via pyannote (needs free HF_TOKEN) or resemblyzer (fully local). Trigger even if user only mentions a file path — they almost always want analysis. Do NOT trigger for short voice notes.
+description: Use whenever the user provides a meeting, call, interview, or lecture recording and wants a transcript, summary, decisions, action items, quotes, risks, or insights. Trigger on audio/video paths and requests such as 'транскрибируй', 'расшифруй созвон', 'саммари со встречи', 'разбери митинг', 'transcribe', 'summarize this call', or 'gigaam'. Always use maximum Whisper large-v3 without asking for a model size. For Russian recordings run full GigaAM v3 and Whisper passes in parallel, align raw timestamped outputs, use the active LLM to identify semantic discrepancies, and ask the user to verify exact intervals in the original recording before treating critical decisions, numbers, deadlines, names, or quotes as confirmed. Produce a structured Russian report after resolution. Optional speaker diarization via pyannote or resemblyzer. Do not trigger for short voice notes.
 ---
 
 # Meeting Transcribe
@@ -9,30 +9,29 @@ description: Use this skill whenever the user has a video/audio recording (.mp4,
 
 ## Что делает
 
-1. Извлекает аудио через `ffmpeg`.
-2. Запускает локальный Whisper с одним из пресетов:
-   - **fast** — `large-v3-turbo`, beam=1 — **дефолт**, годится для большинства рабочих созвонов.
-   - **balanced** — `large-v3-turbo`, beam=5 — маргинально лучше, в ~4× медленнее.
-   - **quality** — `large-v3`, beam=5 — для юр. важных записей, плохого аудио, точных цитат.
-3. **Опционально** диаризирует спикеров (см. ниже — по умолчанию выключено).
-4. Claude сам пишет отчёт по шаблону `assets/report_template.md` на основе транскрипта.
+1. Проверяет исходную запись через `ffmpeg`/`ffprobe`.
+2. Для русской речи запускает **два полных прохода параллельно**: GigaAM v3 и локальный Whisper; для другой речи — только Whisper.
+3. Сопоставляет две русские транскрипции по таймингам и передаёт различия активному LLM для смысловой классификации.
+4. Показывает человеку обе версии и точный интервал исходной записи; ничего не исправляет до явного ответа.
+5. Для Whisper всегда использует максимальную `large-v3`, не предлагает выбор размера модели и при установке сразу скачивает её. Бэкенды с beam search запускают beam=5; MLX остаётся только последним greedy-fallback.
+6. **Опционально** диаризирует спикеров (см. ниже — по умолчанию выключено).
+7. После разрешения критических расхождений пишет отчёт по шаблону `assets/report_template.md`.
 
-> **Что важно понимать про модели:** `fast`/`balanced` используют `large-v3-turbo` (дистиллят `large-v3`), `quality` — полную `large-v3`. Это **разные чекпоинты**, и на сложном аудио (тихая/эмоциональная речь, длинные паузы, перекрытия) `large-v3` заметно точнее. На чистом рабочем созвоне разница в финальном отчёте обычно невелика — Claude восстанавливает структуру (решения, action items, имена) даже из шумноватого транскрипта. Бери `fast` по умолчанию, `quality` — когда нужны точные дословные цитаты ИЛИ аудио объективно сложное.
->
-> Это **не** то же самое, что «whisper.cpp vs mlx vs faster-whisper» — у них разница 1–2% WER на одном чекпоинте, выбор бэкенда идёт по скорости и удобству установки, не по качеству.
+> **Фиксированная политика модели:** не спрашивать «fast/balanced/quality» и не выбирать модель по длительности записи. Штатный чекпоинт всегда `large-v3`; менять можно только технический бэкенд исполнения.
 
-Бэкенд выбирается автоматически в порядке: `whisper-cpp` → `mlx-whisper` → `faster-whisper`. Детали и сравнение — в `references/backends.md`. Установка — в `references/setup.md`.
+Бэкенд выбирается автоматически в порядке: `whisper-cpp` → `faster-whisper` → `mlx-whisper`; MLX остаётся последним fallback без beam search. Детали — в `references/backends.md`, установка — в `references/setup.md`.
 
-## Выбор движка: GigaAM или Whisper
+## Выбор движка
 
-**Для русскоязычных записей дефолт — GigaAM v3** (`v3_e2e_rnnt`, официальный пакет Сбера): в 3–4 раза быстрее `large-v3`, ноль галлюцинаций на тишине в наших сравнениях (у Whisper — 6 на созвоне с 57% тишины и 125 на корпусе лекций), нативная пунктуация и заглавные. Слабое место — англицизмы транслитерируются на слух («гардрейл», «флогенты» вместо guardrail, Langflow). Цифры сравнений — в `references/backends.md`.
+**Для русскоязычных записей дефолт — полный двойной проход:** GigaAM v3 (`v3_e2e_rnnt`, официальный пакет Сбера) + максимальная Whisper `large-v3`. GigaAM может потерять отрицание или транслитерировать термин; независимый Whisper нужен не как источник автоматически «правильных» слов, а как сигнал расхождения.
 
 Whisper остаётся нужен:
 - для нерусских записей и записей с большой долей английской речи;
-- вторым проходом для сверки английских терминов и когда нужен гранулярный `.srt`;
+- полным независимым проходом для сверки русских записей;
+- когда нужен гранулярный `.srt`;
 - если GigaAM не установлен, а пользователь не хочет его ставить.
 
-Если пользователь не назвал движок явно: русская запись → GigaAM (когда установлен — или предложи поставить, см. `references/setup.md` → «GigaAM v3»), иначе — Whisper-workflow ниже.
+Если пользователь не назвал движок явно: русская запись → двойной workflow ниже; другая речь → Whisper-workflow. Один движок для русской записи запускать только по явной просьбе пользователя либо после явного предупреждения, что сверка недоступна.
 
 ### Транскрипция через GigaAM
 
@@ -42,13 +41,66 @@ Whisper остаётся нужен:
 
 **Запускай интерпретатором того venv, где установлен gigaam** (по `references/setup.md` это `~/.venvs/asr`; если venv в другом месте — подставь его путь). Голый `python` вне venv упадёт с `ModuleNotFoundError: torch`.
 
-Скрипт сам нарезает запись Silero VAD-ом по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка — 30 сек) — HF-токен не нужен: в свежих версиях gigaam используется штатный `vad_backend="silero"`, в старых скрипт подменяет VAD самостоятельно. Артефакты те же: `<имя>.transcript.{json,md,srt}` рядом с записью — дальше шаги 4–6 Whisper-workflow (чтение транскрипта → отчёт по шаблону → сохранение).
+Скрипт сам нарезает запись Silero VAD-ом по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка — 30 сек) — HF-токен не нужен: в свежих версиях gigaam используется штатный `vad_backend="silero"`, в старых скрипт подменяет VAD самостоятельно. Отдельный запуск оставлен для диагностики; штатный русский workflow использует оркестратор ниже.
 
-### Гибридная схема (для важных записей)
+### Двухмодельная сверка русскоязычных записей
 
-Если по записи будут приниматься решения — GigaAM как основа, Whisper (`quality`) параллельным вторым прогоном:
-- ключевые решения сверяй между транскриптами дословно — в наших сравнениях это ловило и «правдоподобную неправду» Whisper («Rails» вместо Wails, «агент-регистратор» вместо оркестратора), и потерянное отрицание у GigaAM, разворачивавшее смысл решения;
-- написание английских терминов бери из Whisper-версии, основную ткань текста — из GigaAM.
+1. Preflight по записи — он нужен и здесь, а не только в одиночном workflow:
+
+```bash
+python3 scripts/transcribe.py "<путь>" --analyze
+```
+
+Из JSON взять `analysis.recommendation`: `backend` и флаг `no_condition_on_previous_text`. Показать пользователю длительность, оценку времени и найденные риски (`recommendation.reason` — готовая фраза).
+
+2. Запустить оба ASR на **всей** исходной записи одновременно:
+
+```bash
+python3 scripts/dual_transcribe.py run "<путь>" --whisper-backend <recommendation.backend>
+```
+
+**Если `recommendation.no_condition_on_previous_text == true` — добавить `--no-condition-on-previous-text`.** Флаг передаётся Whisper-половине и лечит залипания после длинных тишин; без него длинная запись с паузами даёт поток ложных расхождений.
+
+Другие параметры:
+- `--initial-prompt "Участники: … Термины: …"` — если пользователь назвал имена или проектный жаргон, повышает точность Whisper по ним.
+- `--diarize` (плюс при необходимости `--diarizer`/`--num-speakers`) — только по явной просьбе; разметка спикеров попадёт в Whisper-артефакт.
+- `--gigaam-device mps|cuda|cpu` — явный override, обычно не нужен: устройство определяется автоматически.
+
+Интерпретаторы скрипт выбирает сам: GigaAM — из `GIGAAM_PYTHON` либо `~/.venvs/asr`, Whisper — из `WHISPER_PYTHON`, либо `~/.venvs/whisper`, либо текущий python3. Если `--analyze` сообщил, что бэкендов нет, а пользователь уверен, что ставил их в venv, — проверить `WHISPER_PYTHON` (см. `references/troubleshooting.md`), а не переустанавливать пакеты.
+
+Команда публикует артефакты только после успешного завершения обоих процессов:
+
+- `<имя>.gigaam.transcript.{json,md,srt}`
+- `<имя>.whisper.transcript.{json,md,srt}`
+- `<имя>.comparison.json`
+- `<имя>.review-template.json`
+- `<имя>.gigaam.log`, `<имя>.whisper.log` — полные логи проходов (при падении: `<имя>.*.failed.log`, транскрипты не публикуются)
+
+3. Прочитать `references/discrepancy-review.md`, оба полных JSON-транскрипта и все элементы `candidates` из comparison JSON. Скопировать review-template в `<имя>.review.json` и дать решение по каждому кандидату строго по контракту; неполный review не рендерится.
+
+4. Отрендерить проверенный результат:
+
+```bash
+python3 scripts/dual_transcribe.py render "<имя>.review.json"
+```
+
+5. Показать пользователю `<имя>.disagreements.md`. Для каждого расхождения там должны быть точный интервал исходной записи, обе версии дословно, категория и причина важности. Критические показывать первыми.
+
+6. **Не выбирать версию автоматически.** Не создавать аудиофрагменты и не предполагать наличие плеера в чате. Попросить пользователя самостоятельно прослушать указанный интервал в исходной записи и сообщить правильную формулировку.
+
+7. Исправлять транскрипт и писать окончательный отчёт только после явного ответа. До ответа считать зависимые решения, сроки, числа и цитаты неподтверждёнными.
+
+### Словарная нормализация терминов (после сверки)
+
+Запускать **только после** того, как расхождения зафиксированы в `<имя>.disagreements.md`: словарь правит написание терминов и не должен скрыть сырой diff. Шаг опциональный — он полезен на записях с англицизмами и проектным жаргоном.
+
+```bash
+python3 scripts/hybrid.py normalize "<имя>.gigaam.transcript.json" --dry-run   # посмотреть, что изменится
+python3 scripts/hybrid.py normalize "<имя>.gigaam.transcript.json"             # → <имя>.gigaam.transcript.normalized.json
+python3 scripts/hybrid.py plan "<имя>.gigaam.transcript.json"                  # что словарь НЕ чинит
+```
+
+`normalize` заменяет только термины из `scripts/lexicons/terms.json` и никогда не трогает термины с `policy: "suggest"` — они омонимичны русским словам и выводятся отдельным списком «требуют решения». Исходный артефакт не перезаписывается. `plan` ранжирует подозрительные места (латиница вне белого списка, гомоглифы, низкая уверенность декодирования, разнобой написаний) — это вход для вопросов пользователю, а не список автоправок.
 
 ## Когда включать диаризацию
 
@@ -62,14 +114,14 @@ Whisper остаётся нужен:
 
 Выбор диаризатора: pyannote (точнее, нужен `HF_TOKEN`) или resemblyzer (fallback, без токенов). Скрипт сам выберет `pyannote`, если токен есть. Подробности — в `references/setup.md` и `references/backends.md`.
 
-## Workflow (Whisper)
+## Workflow (одиночный Whisper)
 
-Шаги 0–3 — специфика Whisper; шаги 4–6 общие для обоих движков (GigaAM-путь описан выше).
+Использовать для нерусской речи либо когда пользователь явно отказался от двойной сверки.
 
 ### Шаг 0. Проверить окружение (только при первом запуске)
 
 ```bash
-python scripts/setup_check.py
+python3 scripts/setup_check.py
 ```
 
 После первой успешной транскрипции этот шаг можно пропускать.
@@ -78,20 +130,20 @@ python scripts/setup_check.py
 
 `ls -la <path>`. Если файла нет — переспроси путь.
 
-### Шаг 2. Preflight-анализ (длительность + риск-факторы → рекомендованный пресет)
+### Шаг 2. Preflight-анализ (длительность, риски и бэкенд)
 
 Перед каждой транскрипцией:
 
 ```bash
-python scripts/transcribe.py "<путь>" --analyze
+python3 scripts/transcribe.py "<путь>" --analyze
 ```
 
 (Добавь `--diarize` если пользователь просил диаризацию.)
 
 Скрипт выведет JSON с двумя блоками:
 
-- `options[]` — оценки времени по всем (бэкенд, пресет) парам.
-- `analysis` — длительность, audio-properties (sample_rate, bitrate, codec), статистика тишин (count/total/max), volume (mean_db/max_db) и **`recommendation`** — `{preset, backend, warnings, reason}`.
+- `options[]` — оценки времени `large-v3` на совместимых бэкендах.
+- `analysis` — длительность, audio-properties, статистика тишин, громкость и рекомендация технического бэкенда. Поле `preset` всегда равно `quality`.
 
 Поле `recommendation.reason` — это **готовая фраза для пользователя**, объясняющая выбор. Используй её в своём сообщении.
 
@@ -100,53 +152,24 @@ python scripts/transcribe.py "<путь>" --analyze
 Если в JSON пришло `"available_backends": []` (или `"options": []`) — у пользователя **не установлен ни один Whisper-бэкенд**. Скрипт сам ничего не ставит. **Не пытайся запускать транскрипцию.** Вместо этого:
 
 1. Определи платформу: `uname -sm`.
-2. Спроси пользователя, какой бэкенд поставить. Покажи варианты, рекомендация зависит от платформы:
+2. Не предлагай размеры модели. На Apple Silicon установи штатный `whisper.cpp`; на остальных платформах — `faster-whisper`, как описано в `references/setup.md`.
+3. Сразу скачай максимальную `large-v3`. Не скачивай `large-v3-turbo` как альтернативу.
+4. После установки повтори `--analyze` и продолжай.
 
-   **На Apple Silicon (Darwin arm64):**
-   - **mlx-whisper** — `pip install mlx-whisper`. Одной командой, ставится за минуту. **Рекомендованный быстрый старт.**
-   - **whisper.cpp** — самый быстрый, но требует cmake-сборки из исходников (~5 минут). Если у пользователя уже стоит cmake — можно предложить.
-   - **faster-whisper** — `pip install faster-whisper`. Работает, но на M-чипах медленнее остальных. Нужен только если планируется pyannote-диаризация.
+#### Шаг 2b. Использование результата
 
-   **На Linux/Windows / Intel Mac:**
-   - **faster-whisper** — `pip install faster-whisper`. Единственный вариант (mlx и whisper.cpp требуют Apple Silicon / отдельной сборки).
-
-3. После подтверждения — поставь выбранный бэкенд (используя тот же python, в котором будет запускаться скрипт; обычно `pip install <pkg>` или `~/.venvs/whisper/bin/pip install <pkg>`).
-4. Для **whisper.cpp** дай ссылку на `references/setup.md` → раздел установки (там cmake-сборка + скачивание моделей) и не пытайся ставить сам.
-5. После установки **повтори шаг 2** (`--analyze`) и продолжай как обычно.
-
-#### Шаг 2b. Использование рекомендации
-
-**По умолчанию запускай тот пресет и бэкенд, что вернул `recommendation`.** Эвристика учитывает:
-
-- **Длительность** — `≥150 мин → quality`, `≥90 мин → balanced`, `<90 мин → fast`.
-- **Длинные тишины (≥30 сек)** — главный сигнал loop-риска для `large-v3-turbo`. Бьют до `quality`.
-- **Высокая доля тишины (>10%)**, **низкий sample_rate (≤8 kHz)**, **низкий битрейт (<64 kbps)**, **тихая запись (mean < −30 dB)** — поднимают до `balanced` если запись ещё не длинная.
-- **Бэкенд** — приоритет `whisper-cpp` (Metal + честный beam search), потом `mlx-whisper`. Для `balanced`/`quality` `mlx-whisper` пропускается (он не умеет beam search).
-
-Покажи пользователю 1–2 строки с длительностью, рекомендацией и причиной. Сразу запускай — без вопроса. Пример для длинной записи с тишинами:
-
-> Запись 2ч 38мин, найдены тишины ≥30 сек (риск зацикливания на turbo). Рекомендую `quality` (large-v3, beam=5) на whisper-cpp — ~26 мин. Запускаю.
-
-Для короткой чистой записи:
-
-> Запись 42 мин, чистое аудио. Запускаю `fast` (~3 мин).
-
-**Когда переопределить рекомендацию:**
-- Пользователь сам сказал «нужно качество», «важная запись», «нужны точные цитаты» → `quality` независимо от рекомендации.
-- Пользователь сказал «быстро», «черновик», «не важно качество» → `fast`.
-- Пользователь явно просит варианты («дай выбрать», «покажи все опции») → покажи таблицу `options[]` и спроси.
+Покажи пользователю длительность, оценку времени и найденные риски. Сразу запускай `large-v3` без вопроса о размере модели. Длинные тишины или большая доля тишины меняют только флаг `--no-condition-on-previous-text`, а не модель.
 
 ### Шаг 3. Запустить транскрипцию
 
 ```bash
-python scripts/transcribe.py "<путь>" \
-  --preset <recommendation.preset> \
+python3 scripts/transcribe.py "<путь>" \
   --backend <recommendation.backend> \
   --language ru \
   --yes
 ```
 
-Подставляй `--preset` и `--backend` прямо из `analysis.recommendation`. `--backend` обязательно прокидывай явно — иначе скрипт может взять `mlx-whisper` (нет beam search) и `balanced`/`quality` молча откатится в greedy.
+Модель и beam не передаются параметрами: скрипт всегда использует `large-v3` с beam=5 (кроме технического greedy-ограничения MLX). Бэкенд бери из `analysis.recommendation`.
 
 **Если `recommendation.no_condition_on_previous_text == true`** — добавь флаг `--no-condition-on-previous-text`. Это критично для длинных записей с тишинами: иначе whisper после длинной паузы залипнет на одной фразе («Так./Видно?», «Продолжение следует…») и hallucination'ит её все оставшееся время через condition-окно.
 
@@ -159,11 +182,11 @@ python scripts/transcribe.py "<путь>" \
 
 ### Шаг 4. Прочитать транскрипт
 
-Прочитай `.transcript.md`. Часовой созвон обычно ~10–20k токенов. Длинные записи (3+ часа) — читай частями.
+Прочитай `.transcript.md`. Часовой созвон обычно ~10–20k токенов. Длинные записи (3+ часа) — читай частями. Для русского двойного workflow сначала полностью завершить сверку выше.
 
 ### Шаг 5. Написать отчёт по шаблону
 
-Открой `assets/report_template.md` и заполни **все** секции на русском, в том же порядке: метаданные → TL;DR → темы → решения → action items → цитаты → открытые вопросы и риски → follow-ups.
+Открой `assets/report_template.md` и заполни **все** секции на русском, в том же порядке: метаданные → TL;DR → темы → решения → action items → цитаты → открытые вопросы и риски → follow-ups. Неразрешённые расхождения явно помечать; не выдавать зависящий от них тезис за подтверждённый.
 
 ### Шаг 6. Сохранить отчёт
 
@@ -183,8 +206,11 @@ python scripts/transcribe.py "<путь>" \
 
 - `scripts/transcribe.py` — основной скрипт (Whisper).
 - `scripts/gigaam_longform.py` — транскрипция через GigaAM v3 (Silero VAD, без HF-токена).
+- `scripts/dual_transcribe.py` — параллельный запуск, временное выравнивание и рендер LLM-сверки.
+- `scripts/hybrid.py` — словарная нормализация и диагностика терминов после фиксации сырого diff.
 - `scripts/setup_check.py` — wizard окружения.
+- `references/discrepancy-review.md` — обязательный контракт LLM и проверки человеком.
 - `references/setup.md` — установка ffmpeg, Python, whisper.cpp, HF_TOKEN.
-- `references/backends.md` — детали бэкендов, моделей, пресетов, диаризаторов.
+- `references/backends.md` — детали бэкендов, фиксированной модели и диаризаторов.
 - `references/troubleshooting.md` — типичные проблемы.
 - `assets/report_template.md` — обязательный шаблон отчёта.

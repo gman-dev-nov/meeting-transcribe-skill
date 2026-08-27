@@ -17,10 +17,8 @@ cd ~/whisper.cpp
 cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j 8
 
-# 3. Модель в ggml-формате — поставь ОДНУ (можно потом докачать вторую)
-bash models/download-ggml-model.sh large-v3-turbo   # ~1.5 ГБ — дефолт (пресеты fast/balanced)
-# ИЛИ если планируешь важные/сложные записи и сразу пресет quality:
-# bash models/download-ggml-model.sh large-v3       # ~3 ГБ — пресет quality, точнее на тяжёлом аудио
+# 3. Обязательная Whisper-модель
+bash models/download-ggml-model.sh large-v3         # ~3 ГБ; quality, beam=5
 
 # 4. Локальная диаризация (опционально — нужна только если будешь использовать --diarize)
 python3 -m venv ~/.venvs/whisper
@@ -31,7 +29,23 @@ pip install resemblyzer scikit-learn
 
 Скилл найдёт whisper.cpp автоматически по путям: `$WHISPER_CPP_HOME`, `~/whisper.cpp/`, `~/.local/share/whisper.cpp/`, или через `whisper-cli` в `$PATH`. Если нестандартное место — выстави `export WHISPER_CPP_HOME=/path/to/whisper.cpp`.
 
-Проверка: `python scripts/setup_check.py` — wizard покажет, всё ли на месте.
+Проверка: `python3 scripts/setup_check.py` — wizard покажет, всё ли на месте,
+и явно напечатает, какими интерпретаторами будут запущены Whisper и GigaAM.
+
+### Каким Python запускаются скрипты
+
+| Переменная | Что задаёт | Если не выставлена |
+|---|---|---|
+| `WHISPER_PYTHON` | интерпретатор для `transcribe.py` (faster-whisper, resemblyzer, pyannote) | `~/.venvs/whisper`, иначе текущий `python3` |
+| `GIGAAM_PYTHON` | интерпретатор для `gigaam_longform.py` (gigaam, torch, silero-vad) | `~/.venvs/asr` |
+
+whisper.cpp — отдельный бинарник, ему интерпретатор безразличен; всё остальное
+ставится в venv, и системный `python3` этих пакетов не увидит. Если пакеты
+лежат в `~/.venvs/whisper`, полезно один раз прописать:
+
+```bash
+echo 'export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python' >> ~/.zshrc
+```
 
 ### ffmpeg без Homebrew
 
@@ -49,7 +63,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 `cmake` для сборки whisper.cpp тоже ставится без brew: `pip install cmake` (уже в инструкции выше).
 
-## GigaAM v3 (рекомендуется для русских записей)
+## GigaAM v3 (обязателен для русских записей)
 
 Официальный пакет Сбера. **PyPI-пакет `gigaam` отстаёт от GitHub** (в нём нет v3-чекпоинтов) — ставить только с GitHub:
 
@@ -60,51 +74,37 @@ pip install "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git
 pip install silero-vad
 ```
 
-Запуск (интерпретатором этого venv — вне активированного venv пиши путь явно): `~/.venvs/asr/bin/python scripts/gigaam_longform.py "запись.m4a" --device mps` (CUDA: `--device cuda`, без GPU: `--device cpu`). Чекпоинт `v3_e2e_rnnt` (~0.4 ГБ) скачается при первом запуске.
+Низкоуровневый запуск из этого venv: `~/.venvs/asr/bin/python3 scripts/gigaam_longform.py "запись.m4a" --device mps`. `--device cuda` и `--device cpu` — явные низкоуровневые оверрайды; штатный `dual_transcribe.py` выбирает устройство сам. Чекпоинт `v3_e2e_rnnt` (~0.4 ГБ) скачается при первом запуске.
 
 HF-токен НЕ нужен: нарезку по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка 30 сек) делает локальный Silero VAD — в свежих версиях gigaam штатно (`vad_backend="silero"`), в старых `gigaam_longform.py` подменяет VAD сам. ffmpeg нужен и здесь (декодирование аудио).
 
-### Какую модель выбрать и как докачать вторую
-
-| Модель | Размер | Пресеты | Когда брать |
-|---|---|---|---|
-| `large-v3-turbo` | ~1.5 ГБ | `fast` (beam=1), `balanced` (beam=5) | **Дефолт.** Рабочие созвоны, планёрки, длинные записи, большинство сценариев |
-| `large-v3` | ~3 ГБ | `quality` (beam=5) | Юридически важные записи, интервью на публикацию, плохое аудио (тихая речь, длинные паузы, перекрытия), точные дословные цитаты |
-
-`turbo` — дистиллят `large-v3`: меньше декодер-слоёв, в ~2× быстрее. **Не «1–2% WER разница»** — на чистом аудио расхождение умеренное, на сложном (тихая/эмоциональная речь, длинные паузы, низкий битрейт) `large-v3` заметно точнее и сильно реже залипает.
-
-Скачать любую отдельно — одна команда, скилл подхватит сразу:
+Проверка полного русского workflow (оба процесса запускаются параллельно, а
+артефакты получают разные суффиксы):
 
 ```bash
-cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo
-# или
-cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3
+python3 scripts/dual_transcribe.py run "запись.m4a" \
+  --whisper-backend whisper-cpp
 ```
 
-Если установлен только `turbo` и запросить `--preset quality` — `transcribe.py` остановится с подсказкой про команду докачки. Препроцессор `--analyze` в любом случае предложит только те пресеты, для которых модель есть.
+На машине с общей GPU-памятью два движка могут работать медленнее, чем по
+отдельности. Это ожидаемо: параллельность нужна, чтобы оба независимых прохода
+были готовы к одной LLM-сверке. При OOM скрипт не переключает модель молча —
+он останавливает оба процесса и сохраняет логи ошибки.
 
-## Минимальная альтернатива (без сборки whisper.cpp)
+### Фиксированный Whisper-режим
 
-Если не хочется ставить cmake и собирать из исходников — можно остановиться на mlx-whisper:
+Штатный workflow всегда использует полную `large-v3` с `quality` и beam=5.
+Скилл не спрашивает, какую модель или размер скачать, и не понижает
+качество ради скорости. `mlx-whisper` сохранён в низкоуровневом CLI
+только для совместимости: он не поддерживает beam=5 и не является вариантом
+штатной установки.
 
-```bash
-brew install ffmpeg
-python3 -m venv ~/.venvs/whisper && source ~/.venvs/whisper/bin/activate
-pip install --upgrade pip
-pip install mlx-whisper resemblyzer scikit-learn
-```
+## faster-whisper на Linux, Windows и Intel Mac
 
-Скилл будет работать, но потеряет:
-- ~30% скорости (mlx RTF 0.06 vs wcpp 0.05 на fast; mlx 0.20 vs wcpp 0.16 на quality)
-- **поддержку beam search** (mlx-whisper её не имеет — `balanced`/`quality` пресеты автоматически откатываются на greedy с warning)
-
-## Когда нужен faster-whisper
-
-`faster-whisper` — кросс-платформенный CPU-движок (CTranslate2). На Apple Silicon в большинстве случаев медленнее mlx-whisper и сам по себе не нужен. Ставь его только если:
-
-- Ты не на Apple Silicon (Linux/Windows) — тогда это единственный вариант.
-- Хочешь использовать **pyannote-диаризацию**. Pyannote опирается на word-level тайм-коды; faster-whisper выдаёт их аккуратнее, чем mlx.
-- Сталкиваешься с **залипаниями на длинных записях (3+ часа)**. У faster-whisper встроенный Silero VAD, который пропускает тишины и снижает галлюцинации.
+`faster-whisper` — штатный кросс-платформенный CPU-движок (CTranslate2) вне
+Apple Silicon. Он поддерживает `large-v3` и реальный beam=5. На Apple Silicon
+штатно использовать whisper.cpp; faster-whisper там может понадобиться
+только для pyannote-диаризации или диагностики проблем бэкенда.
 
 ```bash
 pip install faster-whisper
@@ -143,55 +143,23 @@ HF_TOKEN — просто способ скачивать публичные м�
 ## Первый запуск
 
 При первом запуске скачаются:
-- Модель Whisper (large-v3 ≈ 3 ГБ, large-v3-turbo ≈ 1.5 ГБ).
+- Модель Whisper `large-v3` (≈ 3 ГБ), если бэкенд загружает её лениво.
 - Resemblyzer — голосовой энкодер (~17 МБ), если установлен.
 - Pyannote — модели сегментации и эмбеддинга (~1 ГБ), если установлен.
 
 Всё кешируется в `~/.cache/huggingface/`. Дальнейшие запуски моментально стартуют.
 
-## Что выбрать для разных сценариев
+## Штатная установка по платформе
 
-| Сценарий | Установка |
+| Платформа | Whisper-бэкенд |
 |---|---|
-| Mac, обычные Zoom-созвоны 2–5 человек | mlx-whisper + resemblyzer (минимум выше) |
-| Mac, важные/сложные записи, нужна точная диаризация | + pyannote.audio + faster-whisper + HF_TOKEN |
-| Mac, много 3+ часовых записей | + faster-whisper (его VAD устойчивее на длинном) |
-| Linux/Windows | faster-whisper (mlx не работает) + resemblyzer/pyannote |
-| Только лекции / интервью с одним говорящим | mlx-whisper, без `--diarize` |
+| Apple Silicon | whisper.cpp с Metal |
+| Linux, Windows, Intel Mac | faster-whisper |
 
-## Альтернативные ASR (опционально, по бенчмарку быстрее на M4)
+В обоих случаях режим один: `large-v3`, `quality`, beam=5. Для русской речи
+параллельно обязательно запускается GigaAM, а LLM показывает человеку
+обе версии и интервал исходной записи. Аудиоклипы не создаются, наличие
+встроенного плеера не предполагается.
 
-Эти инструменты в нашем тесте дали более быструю транскрипцию при сопоставимом качестве финального meeting-отчёта. **Не интегрированы** в `transcribe.py` — используются как самостоятельные CLI; после получения `.txt`/`.srt` Claude читает результат и пишет отчёт по `report_template.md` как обычно.
-
-```bash
-# whisper.cpp с Metal (RTF ~0.06 для turbo, ~0.18 для large-v3 на M4)
-pip install cmake
-git clone https://github.com/ggml-org/whisper.cpp.git ~/whisper.cpp
-cd ~/whisper.cpp
-cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j 8
-bash models/download-ggml-model.sh large-v3-turbo
-# Использование:
-~/whisper.cpp/build/bin/whisper-cli -m ~/whisper.cpp/models/ggml-large-v3-turbo.bin \
-    -f audio.wav -l ru -bs 1 -of out -otxt -osrt -ojf
-```
-
-```bash
-# gigaam-mlx (русская специализированная модель Сбера, RTF ~0.08 для rnnt)
-pip install git+https://github.com/aystream/gigaam-mlx.git
-gigaam-mlx audio.mp4 --model-type rnnt --format both --output-dir out/
-# rnnt = быстрее и чище в этом MLX-форке; ctc — базовый вариант
-```
-
-```bash
-# T-one (Conformer 71M от Т-Банка, самый быстрый, но БЕЗ пунктуации/заглавных)
-pip install git+https://github.com/voicekit-team/T-one.git miniaudio
-python -c "
-from tone import StreamingCTCPipeline, read_audio
-pipe = StreamingCTCPipeline.from_hugging_face()
-phrases = pipe.forward_offline(read_audio('audio.wav'))
-print(' '.join(p.text for p in phrases))
-"
-```
-
-Подробности про скорость, качество и пресеты — в `backends.md`. Подробности про залипания, шумы и предобработку — wizard `python scripts/setup_check.py`.
+Подробности про бэкенды и фиксированный quality-режим — в `backends.md`.
+Диагностика окружения: `python3 scripts/setup_check.py`.

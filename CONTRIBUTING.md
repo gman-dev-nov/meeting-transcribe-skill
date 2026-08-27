@@ -9,12 +9,25 @@ PR'ы приветствуются — особенно тесты на корн
 1. Клонируй и поставь зависимости по разделу [Установка](README.md#установка)
    из README. По умолчанию: `whisper.cpp` + `resemblyzer` на Apple Silicon,
    `faster-whisper` + `resemblyzer` на Linux/Windows.
-2. Активируй venv (`source ~/.venvs/whisper/bin/activate`) и проверь окружение:
-   `python scripts/setup_check.py` — wizard покажет, что установлено и чего
-   не хватает.
+2. Проверь окружение: `python3 scripts/setup_check.py` — wizard покажет, что
+   установлено, чего не хватает и какими интерпретаторами будут запущены
+   Whisper и GigaAM (см. `WHISPER_PYTHON` / `GIGAAM_PYTHON` в
+   `references/setup.md`).
 3. Для разработки клонируй репо в произвольную папку, а не в `~/.claude/skills/`.
    На время работы можно сделать симлинк: `ln -s ~/path/to/clone
    ~/.claude/skills/meeting-transcribe` — Claude Code подхватит.
+
+## Тесты
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Зависимостей и моделей не требуют: покрыты политика модели, сопоставление двух
+транскриптов, контракт LLM-review, атомарная публикация артефактов и словарная
+нормализация. Гонять их нужно и системным `python3` (на macOS это 3.9), и
+свежим — в CI матрица 3.9/3.13. Транскрипцию на реальной записи проверяй
+руками: `python3 scripts/dual_transcribe.py run "<файл>"`.
 
 ## Что мы ценим в PR
 
@@ -33,7 +46,7 @@ PR'ы приветствуются — особенно тесты на корн
 
 - Транскрипция и диаризация локальных аудио/видео в meeting-сценарии.
 - Preflight-анализ файла (длительность, тишины, audio props, рекомендация
-  пресета).
+  бэкенда и флагов).
 - Финальный отчёт по [`assets/report_template.md`](assets/report_template.md):
   TL;DR, темы, решения, action items, цитаты, открытые вопросы.
 
@@ -49,8 +62,8 @@ PR'ы приветствуются — особенно тесты на корн
 Перед заведением — поищи похожее в трекере. В описании укажи:
 
 - ОС и чип (`uname -sm`).
-- Используемый Whisper-бэкенд и пресет.
+- Используемый Whisper-бэкенд.
 - Длительность и характер записи (Zoom, телефон, диктофон, лекция).
 - Что ожидалось vs что произошло.
-- Если возможно — `python scripts/transcribe.py "<файл>" --analyze`
+- Если возможно — `python3 scripts/transcribe.py "<файл>" --analyze`
   (preflight-JSON) чтобы было видно профиль входа.
