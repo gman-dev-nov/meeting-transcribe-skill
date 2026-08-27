@@ -386,11 +386,17 @@ def cmd_normalize(args: argparse.Namespace) -> int:
     for seg in data.get("segments", []):
         sink: list[dict] = []
         seg_text = normalize_text(seg.get("text", ""), lex, sink)
-        for word in seg.get("words") or []:
-            wsink: list[dict] = []
-            word["word"] = normalize_text(word.get("word", ""), lex, wsink)
+        # Слова чиним тем же словарём, но события отчёта берём только из
+        # текста сегмента: слова — те же токены, и второй сток удвоил бы счёт.
+        word_events: list[dict] = []
+        words = [
+            normalize_text(word.get("word", ""), lex, word_events)
+            for word in seg.get("words") or []
+        ]
         if not args.dry_run:
             seg["text"] = seg_text
+            for word, replacement in zip(seg.get("words") or [], words):
+                word["word"] = replacement
         for event in sink:
             event["at"] = fmt_ts(seg.get("start", 0.0))
             (suggestions if event["kind"] == "suggest" else replacements).append(event)
