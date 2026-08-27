@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "hybrid.py"
@@ -107,6 +108,31 @@ class MatchTests(unittest.TestCase):
         )
 
         self.assertEqual(lex.match("гардрейлы")[0], "guardrail")
+
+
+class FuzzyGuardTests(unittest.TestCase):
+    """Нечёткая замена латиницы держится на системном словаре английского."""
+
+    def setUp(self):
+        self.lex = lexicon({"canonical": "Guardrail", "policy": "auto", "ru_stems": [],
+                            "ru_exact": [], "latin_variants": []})
+
+    def test_fires_when_the_dictionary_is_available(self):
+        with mock.patch.object(hybrid, "ENGLISH_WORDS", frozenset({"guard"})):
+            canonical, reason = self.lex.match("Guardrale")
+
+        self.assertEqual(canonical, "Guardrail")
+        self.assertTrue(reason.startswith("fuzzy:"))
+
+    def test_is_disabled_without_the_dictionary(self):
+        # Linux/Windows: /usr/share/dict/words нет, и «починить» настоящее
+        # английское слово в термин было бы тихой порчей текста.
+        with mock.patch.object(hybrid, "ENGLISH_WORDS", frozenset()):
+            self.assertEqual(self.lex.match("Guardrale"), (None, ""))
+
+    def test_real_english_word_is_never_rewritten(self):
+        with mock.patch.object(hybrid, "ENGLISH_WORDS", frozenset({"guardian"})):
+            self.assertEqual(self.lex.match("guardian"), (None, ""))
 
 
 class ShippedLexiconTests(unittest.TestCase):

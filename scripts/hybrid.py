@@ -151,7 +151,11 @@ class Lexicon:
         if LATIN.search(core):
             if low in self._latin:
                 return self._latin[low], "latin"
-            if len(low) < MIN_FUZZY_LEN or low in ENGLISH_WORDS:
+            # Без системного словаря английского нечёткую замену не делаем:
+            # именно он не даёт «починить» настоящее английское слово в
+            # похожий термин. На Linux/Windows файла обычно нет — там
+            # остаются только явные latin_variants из словаря.
+            if not ENGLISH_WORDS or len(low) < MIN_FUZZY_LEN or low in ENGLISH_WORDS:
                 return None, ""
             best, score = None, 0.0
             for target in self._fuzzy_targets:
@@ -242,7 +246,6 @@ FILLERS = {
     "хмм", "нда", "э", "эм", "а", "и", "но", "да", "нет", "так", "там", "то",
 }
 
-MIXED_SCRIPT = re.compile(r"(?=.*[а-яёА-ЯЁ])(?=.*[A-Za-z])")
 HAS_DIGIT = re.compile(r"\d")
 
 
@@ -460,6 +463,12 @@ def main() -> int:
     plan.set_defaults(func=cmd_plan)
 
     args = ap.parse_args()
+    if not ENGLISH_WORDS:
+        print(
+            f"! {_WORDS_FILE} недоступен — нечёткая сверка латиницы выключена; "
+            "чинятся только явные варианты из словаря",
+            file=sys.stderr,
+        )
     return args.func(args)
 
 
