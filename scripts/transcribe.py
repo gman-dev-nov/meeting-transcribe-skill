@@ -658,6 +658,13 @@ def _tokens_to_words(tokens: list) -> list[dict]:
     текст стартует с пробела. Служебные маркеры (`[_BEG_]`, `[_TT_123]`) текста
     не несут и пропускаются. Уверенность слова — среднее `p` его токенов;
     она нужна гибридной сверке, чтобы ранжировать спорные места.
+
+    Границы приводятся к монотонным. Без `--dtw` whisper.cpp регулярно отдаёт
+    первым токенам сегмента `from` начала сегмента, а `to` — раньше него: на
+    24-минутном созвоне так получилось 172 слова с `end < start`. Сверка такие
+    тайминги отвергает целиком, поэтому чиним здесь — не выдумывая интервалы,
+    а только запрещая слову начинаться раньше конца предыдущего и кончаться
+    раньше собственного начала.
     """
     words: list[dict] = []
     cur_text = ""
@@ -669,9 +676,15 @@ def _tokens_to_words(tokens: list) -> list[dict]:
         nonlocal cur_text, cur_start, cur_end, cur_probs
         text = cur_text.strip()
         if text and cur_start is not None:
+            start_ms = cur_start
+            end_ms = cur_end if cur_end is not None else start_ms
+            if words:
+                previous_end_ms = int(round(words[-1]["end"] * 1000))
+                start_ms = max(start_ms, previous_end_ms)
+            end_ms = max(end_ms, start_ms)
             words.append({
-                "start": round(cur_start / 1000.0, 3),
-                "end": round((cur_end if cur_end is not None else cur_start) / 1000.0, 3),
+                "start": round(start_ms / 1000.0, 3),
+                "end": round(end_ms / 1000.0, 3),
                 "word": text,
                 "conf": round(sum(cur_probs) / len(cur_probs), 4) if cur_probs else None,
             })
