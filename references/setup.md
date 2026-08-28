@@ -22,8 +22,11 @@ bash models/download-ggml-model.sh large-v3         # ~3 ГБ; quality, beam=5
 
 # 4. Локальная диаризация (опционально — нужна только если будешь использовать --diarize)
 uv venv ~/.venvs/whisper                 # или: python3 -m venv ~/.venvs/whisper
-uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn
+uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn "setuptools<81"
 ```
+
+`setuptools<81` здесь не прихоть: `webrtcvad` внутри resemblyzer импортирует
+`pkg_resources`, которого в setuptools 81+ уже нет.
 
 Скилл найдёт whisper.cpp автоматически по путям: `$WHISPER_CPP_HOME`, `~/whisper.cpp/`, `~/.local/share/whisper.cpp/`, или через `whisper-cli` в `$PATH`. Если нестандартное место — выстави `export WHISPER_CPP_HOME=/path/to/whisper.cpp`.
 

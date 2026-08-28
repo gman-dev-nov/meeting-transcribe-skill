@@ -83,6 +83,18 @@ python3 scripts/transcribe.py "<путь>" --analyze
 
 Если pyannote всё ещё не работает — добавь `--diarizer resemblyzer`, и скрипт переключится на локальный вариант без токена.
 
+## resemblyzer: `ModuleNotFoundError: No module named 'pkg_resources'`
+
+Падает не resemblyzer, а его зависимость `webrtcvad`: она делает
+`import pkg_resources` на верхнем уровне, а setuptools 81+ этот модуль больше
+не поставляет. Лечится пином:
+
+```bash
+uv pip install --python ~/.venvs/whisper/bin/python "setuptools<81"
+```
+
+Останется предупреждение `pkg_resources is deprecated` — это нормально.
+
 ## Resemblyzer не может скачать веса
 
 При первом запуске resemblyzer скачивает голосовой энкодер с GitHub releases (~17 МБ). Если корпоративный прокси блокирует — можно скачать вручную: репозиторий [resemble-ai/Resemblyzer](https://github.com/resemble-ai/Resemblyzer) → веса в папку пакета.

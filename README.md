@@ -224,7 +224,7 @@ Whisper-бэкендом. Нестандартный путь передаётс
 
 ```bash
 # Локальная, без токенов (на 2–5 спикерах достаточно)
-uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn
+uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn "setuptools<81"
 
 # Или точнее, но нужен бесплатный HF_TOKEN
 uv pip install --python ~/.venvs/whisper/bin/python pyannote.audio
