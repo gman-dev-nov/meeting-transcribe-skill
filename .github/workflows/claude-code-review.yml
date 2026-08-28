@@ -42,7 +42,14 @@ jobs:
           plugins: 'code-review@claude-code-plugins'
           # --comment обязателен: без него скилл отдаёт находки в вывод джоба,
           # а на PR не пишет ничего.
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment
+
+            Когда ревью закончено, обязательно оставь на PR ровно один
+            top-level комментарий через `gh pr comment` — даже если находок
+            нет, напиши об этом одной строкой. Молчание запрещено: зелёный
+            джоб без единого комментария неотличим от несостоявшегося ревью,
+            и именно так этот воркфлоу однажды молчал на двух PR подряд.
           # Без allowedTools публикующие инструменты запрещены, и попытки
           # прокомментировать PR молча отклоняются (в логе — permission_denials).
           claude_args: |
