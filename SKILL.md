@@ -63,7 +63,7 @@ python3 scripts/dual_transcribe.py run "<путь>" --whisper-backend <recommend
 
 Другие параметры:
 - `--initial-prompt "Участники: … Термины: …"` — если пользователь назвал имена или проектный жаргон, повышает точность Whisper по ним.
-- `--diarize` (плюс при необходимости `--diarizer`/`--num-speakers`) — только по явной просьбе; разметка спикеров попадёт в Whisper-артефакт.
+- `--diarize` (плюс при необходимости `--diarizer`/`--num-speakers`) — только по явной просьбе. Спикеры считаются **один раз после обоих проходов** и раскладываются по обоим транскриптам, поэтому метки `SPEAKER_00`/`SPEAKER_01` в версиях GigaAM и Whisper означают одного и того же человека: расхождение можно показывать вместе с тем, кто это сказал.
 - `--gigaam-device mps|cuda|cpu` — явный override, обычно не нужен: устройство определяется автоматически.
 
 Интерпретаторы скрипт выбирает сам: GigaAM — из `GIGAAM_PYTHON` либо `~/.venvs/asr`, Whisper — из `WHISPER_PYTHON`, либо `~/.venvs/whisper`, либо текущий python3. Если `--analyze` сообщил, что бэкендов нет, а пользователь уверен, что ставил их в venv, — проверить `WHISPER_PYTHON` (см. `references/troubleshooting.md`), а не переустанавливать пакеты.
@@ -120,6 +120,15 @@ python3 scripts/hybrid.py plan "<имя>.gigaam.transcript.json"
 На типовом созвоне 4–6 спикеров Claude атрибутирует реплики по контексту самостоятельно. Диаризация добавляет ~10–20% точности и улучшает читаемость, но стоит времени.
 
 Выбор диаризатора: pyannote (точнее, нужен `HF_TOKEN`) или resemblyzer (fallback, без токенов). Скрипт сам выберет `pyannote`, если токен есть. Подробности — в `references/setup.md` и `references/backends.md`.
+
+У самого GigaAM диаризации нет: пакет использует pyannote только как VAD («где речь»), а не как speaker diarization («кто говорит»). Поэтому спикеров для обоих транскриптов считает `transcribe.py`, и запускается он тем интерпретатором, где стоит диаризатор (`WHISPER_PYTHON`). Отдельно этот шаг вызывается так:
+
+```bash
+python3 scripts/transcribe.py "<путь к записи>" --diarize-only \
+  --apply-to "<имя>.gigaam.transcript.json" "<имя>.whisper.transcript.json"
+```
+
+Он перезаписывает `.json`, `.md` и `.srt` указанных транскриптов, добавляя спикеров, и не трогает текст.
 
 ## Workflow (одиночный Whisper)
 

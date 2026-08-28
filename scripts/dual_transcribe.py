@@ -639,12 +639,30 @@ def build_asr_commands(args: argparse.Namespace, staging_dir: Path) -> dict[str,
         whisper.extend(["--initial-prompt", args.initial_prompt])
     if args.no_condition_on_previous_text:
         whisper.append("--no-condition-on-previous-text")
-    if args.diarize:
-        whisper.extend(["--diarize", "--diarizer", args.diarizer])
-        whisper.extend(["--max-speakers", str(args.max_speakers)])
-        if args.num_speakers is not None:
-            whisper.extend(["--num-speakers", str(args.num_speakers)])
+    # Диаризация не встраивается в ASR-проход: спикеры считаются один раз
+    # после обоих проходов и раскладываются по обоим транскриптам, иначе
+    # метки в двух версиях были бы несопоставимы между собой.
     return {"gigaam": gigaam, "whisper": whisper}
+
+
+def build_diarize_command(
+    args: argparse.Namespace, transcripts: list[Path]
+) -> list[str]:
+    command = [
+        _resolve_executable(args.whisper_python, "Python для Whisper"),
+        str(WHISPER_SCRIPT),
+        str(args.input.expanduser().resolve()),
+        "--diarize-only",
+        "--diarizer",
+        args.diarizer,
+        "--max-speakers",
+        str(args.max_speakers),
+        "--apply-to",
+        *[str(path) for path in transcripts],
+    ]
+    if args.num_speakers is not None:
+        command.extend(["--num-speakers", str(args.num_speakers)])
+    return command
 
 
 def _pump_output(name: str, process: subprocess.Popen, log_path: Path) -> None:
@@ -1051,6 +1069,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             gigaam_json = staging / f"{source.stem}.gigaam.transcript.json"
             whisper_json = staging / f"{source.stem}.whisper.transcript.json"
+            if args.diarize:
+                command = build_diarize_command(args, [gigaam_json, whisper_json])
+                print("\nСчитаю спикеров один раз для обоих транскриптов.", flush=True)
+                print(f"[diarize] запуск: {' '.join(command)}", flush=True)
+                code = subprocess.call(command)
+                if code != 0:
+                    raise ValueError(f"диаризация завершилась с кодом {code}")
             staged_comparison = staging / f"{source.stem}.comparison.json"
             comparison = write_comparison(
                 gigaam_json,

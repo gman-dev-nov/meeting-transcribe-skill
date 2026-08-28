@@ -772,13 +772,75 @@ def transcribe_mlx_whisper(
     return out
 
 
+# -------------- ДИАРИЗАЦИЯ: общая привязка --------------
+
+# Диаризация даёт интервалы «здесь говорит такой-то» — они не зависят от того,
+# каким ASR получен транскрипт. Поэтому спикеры считаются один раз, а
+# раскладываются по любому числу транскриптов: у GigaAM и Whisper сегменты
+# разной длины, но метки после этого сопоставимы между собой.
+Span = tuple  # (start: float, end: float, label: str)
+
+
+def assign_speakers(
+    segments: list[Segment], spans: list[Span], *, backfill: bool = False
+) -> int:
+    """Проставить сегментам спикера по максимальному перекрытию с интервалами.
+
+    `backfill` наследует метку от ближайшего соседа тем сегментам, которые не
+    пересеклись ни с одним интервалом. Это поведение resemblyzer, который
+    пропускает слишком короткие куски; у pyannote отсутствие перекрытия обычно
+    означает не-речь, и выдумывать там спикера не нужно.
+    """
+    label_remap: dict = {}
+    next_id = 0
+    ordered = sorted(spans, key=lambda item: item[0])
+    for seg in segments:
+        best_label = None
+        best_overlap = 0.0
+        for s_start, s_end, label in ordered:
+            overlap = max(0.0, min(seg.end, s_end) - max(seg.start, s_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_label = label
+        if best_label is not None:
+            if best_label not in label_remap:
+                label_remap[best_label] = f"SPEAKER_{next_id:02d}"
+                next_id += 1
+            seg.speaker = label_remap[best_label]
+    if backfill:
+        for index, seg in enumerate(segments):
+            if seg.speaker is not None:
+                continue
+            neighbours = list(range(index - 1, -1, -1)) + list(
+                range(index + 1, len(segments))
+            )
+            for other in neighbours:
+                if segments[other].speaker:
+                    seg.speaker = segments[other].speaker
+                    break
+    return len(label_remap)
+
+
+def spans_from_labelled_segments(
+    segments: list[Segment], indices: list[int], labels
+) -> list[Span]:
+    """Склеить соседние сегменты одного кластера в интервалы спикера."""
+    spans: list[Span] = []
+    for index, label in zip(indices, labels):
+        seg = segments[index]
+        if spans and spans[-1][2] == str(label):
+            spans[-1] = (spans[-1][0], max(spans[-1][1], seg.end), spans[-1][2])
+        else:
+            spans.append((seg.start, seg.end, str(label)))
+    return spans
+
+
 # -------------- ДИАРИЗАЦИЯ: pyannote --------------
 
-def diarize_pyannote(
+def pyannote_spans(
     audio_path: Path,
-    segments: list[Segment],
     num_speakers: Optional[int],
-) -> int:
+) -> list[Span]:
     try:
         from pyannote.audio import Pipeline
     except ImportError:
@@ -857,41 +919,38 @@ def diarize_pyannote(
     # pyannote 4.x returns DiarizeOutput; .speaker_diarization is the
     # Annotation. pyannote 3.x returns the Annotation directly.
     diarization = getattr(diarization, "speaker_diarization", diarization)
-    spans = []
+    spans: list[Span] = []
     for turn, _, label in diarization.itertracks(yield_label=True):
         spans.append((turn.start, turn.end, label))
     spans.sort(key=lambda x: x[0])
     speakers = sorted({s[2] for s in spans})
     print(f"[pyannote] найдено спикеров: {len(speakers)}", flush=True)
+    return spans
 
-    # Привязываем спикера к каждому сегменту по максимальному перекрытию
-    label_remap = {}
-    next_id = 0
-    for seg in segments:
-        best_label = None
-        best_overlap = 0.0
-        for s_start, s_end, label in spans:
-            overlap = max(0.0, min(seg.end, s_end) - max(seg.start, s_start))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_label = label
-        if best_label is not None:
-            if best_label not in label_remap:
-                label_remap[best_label] = f"SPEAKER_{next_id:02d}"
-                next_id += 1
-            seg.speaker = label_remap[best_label]
 
-    return len(label_remap)
+def diarize_pyannote(
+    audio_path: Path,
+    segments: list[Segment],
+    num_speakers: Optional[int],
+) -> int:
+    return assign_speakers(segments, pyannote_spans(audio_path, num_speakers))
 
 
 # -------------- ДИАРИЗАЦИЯ: resemblyzer --------------
 
-def diarize_resemblyzer(
+def resemblyzer_spans(
     audio_path: Path,
     segments: list[Segment],
     num_speakers: Optional[int],
     max_speakers: int = 6,
-) -> int:
+) -> list[Span]:
+    """Кластеризовать эмбеддинги сегментов и свернуть их в интервалы спикеров.
+
+    Resemblyzer, в отличие от pyannote, считает эмбеддинги по готовым
+    сегментам, поэтому «основой» для общего прохода берётся самый дробный
+    транскрипт — интервалы получаются настолько granular, насколько позволяет
+    его сегментация.
+    """
     try:
         import numpy as np
         from resemblyzer import VoiceEncoder, preprocess_wav
@@ -928,7 +987,7 @@ def diarize_resemblyzer(
         print(f"[resemblyzer] пропущено коротких: {skipped}", flush=True)
     if not embeds:
         print("[resemblyzer] нет валидных эмбеддингов — пропускаю диаризацию", file=sys.stderr)
-        return 0
+        return []
 
     embeds_np = np.vstack(embeds)
 
@@ -962,28 +1021,17 @@ def diarize_resemblyzer(
             labels, chosen_k = best_labels, best_k
             print(f"[resemblyzer] выбрано {chosen_k} спикер(ов), silhouette={best_score:.3f}", flush=True)
 
-    label_to_speaker = {}
-    next_id = 0
-    for idx, lbl in zip(indices, labels):
-        if lbl not in label_to_speaker:
-            label_to_speaker[lbl] = f"SPEAKER_{next_id:02d}"
-            next_id += 1
-        segments[idx].speaker = label_to_speaker[lbl]
+    return spans_from_labelled_segments(segments, indices, labels)
 
-    # пробросить пропущенным короткие сегменты — спикер от соседа
-    for i, seg in enumerate(segments):
-        if seg.speaker is None:
-            for j in range(i - 1, -1, -1):
-                if segments[j].speaker:
-                    seg.speaker = segments[j].speaker
-                    break
-            else:
-                for j in range(i + 1, len(segments)):
-                    if segments[j].speaker:
-                        seg.speaker = segments[j].speaker
-                        break
 
-    return chosen_k
+def diarize_resemblyzer(
+    audio_path: Path,
+    segments: list[Segment],
+    num_speakers: Optional[int],
+    max_speakers: int = 6,
+) -> int:
+    spans = resemblyzer_spans(audio_path, segments, num_speakers, max_speakers)
+    return assign_speakers(segments, spans, backfill=True)
 
 
 # -------------- АРТЕФАКТЫ --------------
@@ -1006,7 +1054,13 @@ def write_markdown(segments: list[Segment], meta: dict, out_path: Path) -> None:
         f"# Транскрипт: {meta.get('source_file', '')}",
         "",
         f"- Длительность: {meta.get('duration_hms', '?')}",
-        f"- Модель: {meta.get('model', '?')} (preset={meta.get('preset', '?')}, backend={meta.get('backend', '?')})",
+        (
+            f"- Модель: {meta.get('model', '?')} (движок={meta['engine']}, "
+            f"VAD={meta.get('vad', '?')}, device={meta.get('device', '?')})"
+            if meta.get("engine")
+            else f"- Модель: {meta.get('model', '?')} "
+                 f"(preset={meta.get('preset', '?')}, backend={meta.get('backend', '?')})"
+        ),
         f"- Язык: {meta.get('language', '?')}",
     ]
     if meta.get("speakers_detected"):
@@ -1040,6 +1094,68 @@ def write_srt(segments: list[Segment], out_path: Path) -> None:
         lines.append("")
     out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"[write] {out_path.name}", flush=True)
+
+
+def load_segments(path: Path) -> tuple[list[Segment], dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    segments = [
+        Segment(
+            start=float(item["start"]),
+            end=float(item["end"]),
+            text=str(item.get("text", "")),
+            speaker=item.get("speaker"),
+            words=item.get("words") or [],
+        )
+        for item in data.get("segments", [])
+    ]
+    return segments, data.get("metadata") or {}
+
+
+def apply_shared_diarization(
+    audio_path: Path,
+    transcripts: list[Path],
+    diarizer: str,
+    num_speakers: Optional[int],
+    max_speakers: int,
+) -> int:
+    """Посчитать спикеров один раз и разложить их по нескольким транскриптам.
+
+    Интервалы спикеров не зависят от ASR, поэтому метки в разных транскриптах
+    одной записи после этого сопоставимы: расхождение можно показывать вместе
+    с тем, кто это сказал.
+    """
+    loaded = [(path, *load_segments(path)) for path in transcripts]
+    for path, segments, _ in loaded:
+        if not segments:
+            print(f"ERROR: в {path.name} нет сегментов", file=sys.stderr)
+            return 0
+
+    if diarizer == "pyannote":
+        spans = pyannote_spans(audio_path, num_speakers)
+    else:
+        # Основа для эмбеддингов — самый дробный транскрипт: интервалы выходят
+        # настолько точными, насколько позволяет лучшая из двух сегментаций.
+        basis_path, basis_segments, _ = max(loaded, key=lambda item: len(item[1]))
+        print(f"[diarize] основа для эмбеддингов: {basis_path.name} "
+              f"({len(basis_segments)} сегментов)", flush=True)
+        spans = resemblyzer_spans(audio_path, basis_segments, num_speakers, max_speakers)
+    if not spans:
+        print("ERROR: диаризация не дала ни одного интервала", file=sys.stderr)
+        return 0
+
+    speakers = 0
+    backfill = diarizer != "pyannote"
+    for path, segments, meta in loaded:
+        speakers = assign_speakers(segments, spans, backfill=backfill)
+        meta = {**meta, "diarizer": diarizer, "speakers_detected": speakers,
+                "diarization_scope": "shared"}
+        duration = float(meta.get("duration_seconds") or (segments[-1].end if segments else 0.0))
+        write_json(segments, duration, {k: v for k, v in meta.items()
+                                        if k != "duration_seconds"}, path)
+        stem = path.name[: -len(".json")] if path.name.endswith(".json") else path.stem
+        write_markdown(segments, meta, path.with_name(stem + ".md"))
+        write_srt(segments, path.with_name(stem + ".srt"))
+    return speakers
 
 
 # -------------- ОЦЕНКА И ВЫБОР --------------
@@ -1155,6 +1271,15 @@ def main() -> int:
         default="",
         help="Суффикс имени артефактов перед .transcript (например, .whisper).",
     )
+    parser.add_argument(
+        "--diarize-only", action="store_true",
+        help="Не транскрибировать: посчитать спикеров один раз и разложить их "
+             "по готовым транскриптам из --apply-to.",
+    )
+    parser.add_argument(
+        "--apply-to", type=Path, nargs="+", default=None,
+        help="JSON-транскрипты одной и той же записи, которым проставить спикеров.",
+    )
     parser.add_argument("--estimate-only", action="store_true",
                         help="Только напечатать оценку времени (JSON) и выйти.")
     parser.add_argument("--analyze", action="store_true",
@@ -1177,6 +1302,34 @@ def main() -> int:
 
     check_ffmpeg()
     env = detect_environment()
+
+    # Режим общей диаризации: Whisper-бэкенд здесь не нужен вовсе.
+    if args.diarize_only:
+        if not args.apply_to:
+            print("ERROR: --diarize-only требует --apply-to <transcript.json …>", file=sys.stderr)
+            return 1
+        missing = [str(path) for path in args.apply_to if not path.is_file()]
+        if missing:
+            print(f"ERROR: транскрипт не найден: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        diarizer = resolve_diarizer(args.diarizer, env)
+        if diarizer is None:
+            print("ERROR: --diarizer none несовместим с --diarize-only", file=sys.stderr)
+            return 1
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / f"{input_path.stem}.diarize.wav"
+            extract_audio(input_path, wav_path)
+            speakers = apply_shared_diarization(
+                wav_path,
+                [path.expanduser().resolve() for path in args.apply_to],
+                diarizer,
+                args.num_speakers,
+                args.max_speakers,
+            )
+        if not speakers:
+            return 2
+        print(f"\n✅ Спикеров: {speakers}; метки одинаковы во всех транскриптах.")
+        return 0
 
     quality_model = PRESETS["quality"]["model"]
     quality_wcpp = bool(
