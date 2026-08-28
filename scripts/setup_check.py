@@ -11,6 +11,7 @@ Setup wizard для meeting-transcribe.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import platform
@@ -18,6 +19,48 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def load_transcribe():
+    """Подтянуть transcribe.py, чтобы не повторять его разведку whisper.cpp.
+
+    Список путей к бинарнику и каталогу моделей — единственный источник
+    правды в transcribe.py, потому что именно он определяет, запустится ли
+    транскрипция. Wizard обязан отвечать ровно то же самое: пока он повторял
+    эти пути своим списком, `WHISPER_CPP_MODELS` и вывод каталога моделей из
+    пути бинарника в него не попали, и на таком окружении wizard сообщал
+    «модель не скачана» при полностью рабочем пайплайне.
+
+    В отличие от `resolve_whisper_python`, дублировать тут нечего: без
+    transcribe.py скилла всё равно нет, и это само по себе диагноз.
+    """
+    path = SCRIPT_DIR / "transcribe.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("transcribe_for_setup_check", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 — wizard не должен падать из-за этого
+        print(f"  ⚠️  не удалось прочитать transcribe.py: {exc}", file=sys.stderr)
+        return None
+    return module
+
+
+def whisper_cpp_state(transcribe) -> tuple:
+    """(бинарник найден, максимальная модель на месте) — правилами transcribe.py."""
+    if transcribe is None:
+        return False, False
+    bin_path, models_dir = transcribe.find_whisper_cpp()
+    if not bin_path:
+        return False, False
+    return True, bool(transcribe.whisper_cpp_model_path(models_dir, "large-v3"))
 
 
 def venv_python(name: str) -> Path:
@@ -114,25 +157,10 @@ def main() -> int:
     print("\n2) Whisper-бэкенды")
 
     # whisper.cpp — рекомендуемый дефолт на Apple Silicon: самый быстрый + честный beam search
-    wcpp_paths = [
-        os.environ.get("WHISPER_CPP_BIN", ""),
-        f"{os.environ.get('WHISPER_CPP_HOME', '')}/build/bin/whisper-cli",
-        f"{Path.home()}/whisper.cpp/build/bin/whisper-cli",
-        f"{Path.home()}/.local/share/whisper.cpp/build/bin/whisper-cli",
-        "/usr/local/bin/whisper-cli",
-        "/opt/homebrew/bin/whisper-cli",
-    ]
-    has_wcpp_bin = any(p and Path(p).is_file() for p in wcpp_paths) or shutil.which("whisper-cli") is not None
-
-    def _has_wcpp_model(name: str) -> bool:
-        candidates = [
-            f"{Path.home()}/whisper.cpp/models/ggml-{name}.bin",
-            f"{os.environ.get('WHISPER_CPP_HOME', '')}/models/ggml-{name}.bin",
-            f"{Path.home()}/.local/share/whisper.cpp/models/ggml-{name}.bin",
-        ]
-        return any(p and Path(p).is_file() for p in candidates)
-
-    wcpp_has_v3 = has_wcpp_bin and _has_wcpp_model("large-v3")
+    transcribe = load_transcribe()
+    if transcribe is None:
+        print("  ⚠️  scripts/transcribe.py рядом не найден — проверка whisper.cpp невозможна")
+    has_wcpp_bin, wcpp_has_v3 = whisper_cpp_state(transcribe)
     wcpp_usable = has_wcpp_bin and wcpp_has_v3
 
     check("whisper.cpp (рекомендуемый дефолт на Apple Silicon)", has_wcpp_bin,

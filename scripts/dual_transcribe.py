@@ -90,6 +90,22 @@ DECISION_STEMS = (
     "срок",
 )
 SEVERITIES = {"critical", "substantive", "minor"}
+# Машинные сигналы — намеренно отдельный и более грубый словарь, чем CATEGORIES
+# ниже. Он ставится эвристикой по изменённым словам и склеивает то, что в
+# контракте разделено: "decision_or_commitment" накрывает и `decision`, и
+# `commitment_or_action`, "name_or_term" — и `name_or_entity`, и
+# `technical_term`. Копировать эти значения в поле `categories` review-JSON
+# нельзя: render их отвергнет. Совпадающие имена (negation_or_polarity,
+# number_or_unit, date_or_deadline, meaningful_omission) — совпадают потому,
+# что там деления нет.
+SIGNALS = {
+    "date_or_deadline",
+    "decision_or_commitment",
+    "meaningful_omission",
+    "name_or_term",
+    "negation_or_polarity",
+    "number_or_unit",
+}
 CATEGORIES = {
     "commitment_or_action",
     "condition_or_scope",
@@ -1086,6 +1102,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     source = args.input.expanduser().resolve()
     if not source.is_file():
         print(f"ERROR: файл не найден: {source}", file=sys.stderr)
+        return 1
+    if args.diarize and args.diarizer == "none":
+        # Иначе это всплывёт только кодом возврата подпроцесса — после того,
+        # как оба ASR-прохода уже отработали.
+        print(
+            "ERROR: --diarize с --diarizer none противоречивы: "
+            "убери --diarize либо выбери pyannote/resemblyzer/auto",
+            file=sys.stderr,
+        )
         return 1
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         print("ERROR: нужны ffmpeg и ffprobe в PATH", file=sys.stderr)

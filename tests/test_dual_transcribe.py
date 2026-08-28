@@ -118,6 +118,33 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(interval["precision"], "segment")
 
 
+class SignalVocabularyTests(unittest.TestCase):
+    """Сигналы и категории — намеренно разные словари; закрепляем это."""
+
+    def test_signals_are_exactly_what_the_heuristic_can_emit(self):
+        gigaam = transcript([(1.0, 1.5, "не"), (1.5, 2.0, "пять"),
+                             (2.0, 2.5, "решили"), (2.5, 3.0, "завтра"),
+                             (3.0, 3.5, "Foo")])
+        whisper = transcript([(1.0, 1.5, "пять"), (1.5, 2.0, "шесть")])
+        comparison = dual.build_comparison(
+            gigaam, whisper, Path("meeting.wav"), 10.0
+        )
+
+        emitted = {s for item in comparison["candidates"] for s in item["machine_signals"]}
+        self.assertTrue(emitted)
+        self.assertTrue(emitted <= dual.SIGNALS, emitted - dual.SIGNALS)
+
+    def test_looser_signals_are_not_valid_review_categories(self):
+        # Если однажды словари сольют, тест должен упасть, а не разойтись молча.
+        self.assertNotIn("decision_or_commitment", dual.CATEGORIES)
+        self.assertNotIn("name_or_term", dual.CATEGORIES)
+        self.assertEqual(
+            dual.SIGNALS & dual.CATEGORIES,
+            {"date_or_deadline", "meaningful_omission",
+             "negation_or_polarity", "number_or_unit"},
+        )
+
+
 class RenderTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

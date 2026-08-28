@@ -1,9 +1,11 @@
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "transcribe.py"
@@ -126,3 +128,57 @@ class ModelPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SETUP_CHECK = Path(__file__).resolve().parents[1] / "scripts" / "setup_check.py"
+SETUP_SPEC = importlib.util.spec_from_file_location("setup_check_policy", SETUP_CHECK)
+setup_check = importlib.util.module_from_spec(SETUP_SPEC)
+assert SETUP_SPEC and SETUP_SPEC.loader
+sys.modules[SETUP_SPEC.name] = setup_check
+SETUP_SPEC.loader.exec_module(setup_check)
+
+
+class WizardMatchesRunnerTests(unittest.TestCase):
+    """Wizard обязан видеть whisper.cpp ровно там же, где его видит transcribe.py."""
+
+    def environment(self, root: Path) -> dict:
+        binary = root / "bin" / "whisper-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("", encoding="utf-8")
+        models = root / "models"
+        models.mkdir()
+        (models / "ggml-large-v3.bin").write_text("", encoding="utf-8")
+        return {"WHISPER_CPP_BIN": str(binary), "WHISPER_CPP_MODELS": str(models)}
+
+    def load_transcribe_with(self, env: dict):
+        with mock.patch.dict(os.environ, env, clear=False):
+            spec = importlib.util.spec_from_file_location("transcribe_env_probe", SCRIPT)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+        return module
+
+    def test_models_dir_from_env_is_visible_to_the_wizard(self):
+        # Регрессия: wizard повторял пути своим списком, в котором не было
+        # WHISPER_CPP_MODELS, и сообщал «модель не скачана» на рабочем окружении.
+        with tempfile.TemporaryDirectory() as temporary:
+            env = self.environment(Path(temporary))
+            module = self.load_transcribe_with(env)
+
+            self.assertEqual(
+                setup_check.whisper_cpp_state(module), (True, True)
+            )
+
+    def test_missing_model_is_reported_as_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = self.environment(root)
+            (root / "models" / "ggml-large-v3.bin").unlink()
+            module = self.load_transcribe_with(env)
+
+            self.assertEqual(
+                setup_check.whisper_cpp_state(module), (True, False)
+            )
+
+    def test_wizard_survives_a_missing_transcribe_module(self):
+        self.assertEqual(setup_check.whisper_cpp_state(None), (False, False))
