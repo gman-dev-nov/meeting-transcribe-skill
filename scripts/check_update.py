@@ -171,24 +171,52 @@ def fetch_latest_release(url=RELEASES_API_URL, timeout=NETWORK_TIMEOUT_SECONDS):
     return json.loads(payload.decode("utf-8"))
 
 
+def _clean_note(raw):
+    """Буллет -> строка для человека."""
+    note = re.sub(r"^[-*+]\s+", "", raw.strip())
+    note = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", note)  # markdown-ссылки
+    note = note.replace("`", "").replace("**", "")
+    note = " ".join(note.split())  # переносы строк схлопываем в пробелы
+    if len(note) > MAX_NOTE_CHARS:
+        note = note[: MAX_NOTE_CHARS - 1].rstrip() + "…"
+    return note
+
+
 def extract_notes(body):
-    """Список улучшений из тела релиза: только буллеты, коротко."""
+    """Список улучшений из тела релиза: только буллеты, коротко.
+
+    Буллет в CHANGELOG почти всегда перенесён на несколько строк, и его
+    продолжение — это отступ, а не новый пункт. Пока продолжения отбрасывались,
+    пользователь читал обрывки вроде «Спорные места подтверждает человек: скилл
+    показывает точный интервал» — фраза кончалась на середине.
+    """
     notes = []
+    current = None
+
+    def flush(current):
+        if current is None:
+            return
+        note = _clean_note(current)
+        if note:
+            notes.append(note)
+
     for line in str(body or "").splitlines():
         stripped = line.strip()
-        if not re.match(r"^[-*+]\s+\S", stripped):
-            continue
-        note = re.sub(r"^[-*+]\s+", "", stripped)
-        note = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", note)  # markdown-ссылки
-        note = note.replace("`", "").replace("**", "").strip()
-        if not note:
-            continue
-        if len(note) > MAX_NOTE_CHARS:
-            note = note[: MAX_NOTE_CHARS - 1].rstrip() + "…"
-        notes.append(note)
-        if len(notes) >= MAX_NOTES:
-            break
-    return notes
+        if re.match(r"^[-*+]\s+\S", stripped):
+            flush(current)
+            if len(notes) >= MAX_NOTES:
+                return notes
+            current = stripped
+        elif current is not None and stripped and line[:1].isspace():
+            current = "{} {}".format(current, stripped)
+        else:
+            flush(current)
+            current = None
+            if len(notes) >= MAX_NOTES:
+                return notes
+
+    flush(current)
+    return notes[:MAX_NOTES]
 
 
 def release_summary(payload):
@@ -329,7 +357,7 @@ def git(args, skill_dir=SKILL_DIR):
 # --------------------------------------------------------------------------- #
 
 
-def render_notice(summary, installed, install_kind):
+def render_notice(summary, installed, install_kind, skill_dir=SKILL_DIR):
     """Текст, который увидит пользователь после отчёта."""
     lines = [
         "",
@@ -352,12 +380,12 @@ def render_notice(summary, installed, install_kind):
     elif install_kind == "git":
         lines.append(
             "Обновить: `python3 {}/scripts/check_update.py --update` — "
-            "только с твоего явного согласия.".format(SKILL_DIR)
+            "только с твоего явного согласия.".format(skill_dir)
         )
     else:
         lines.append(
             "Каталог скилла не под git — обновление вручную: скачай новую версию "
-            "со страницы релизов и замени каталог {}.".format(SKILL_DIR)
+            "со страницы релизов и замени каталог {}.".format(skill_dir)
         )
     lines.append(
         "Изменения вступят в силу со следующей сессии: текущая уже держит "
@@ -412,7 +440,7 @@ def check(force=False, env=None, skill_dir=SKILL_DIR, fetch=fetch_latest_release
         return None
 
     install_kind, _ = detect_install(skill_dir, env)
-    return render_notice(summary, installed, install_kind)
+    return render_notice(summary, installed, install_kind, skill_dir)
 
 
 def status(env=None, skill_dir=SKILL_DIR, now=None):

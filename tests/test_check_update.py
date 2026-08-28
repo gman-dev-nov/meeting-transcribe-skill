@@ -95,6 +95,46 @@ class NotesTests(unittest.TestCase):
         notes = check_update.extract_notes(RELEASE["body"])
         self.assertEqual(notes, ["Первое улучшение", "Второе улучшение"])
 
+    def test_multiline_bullet_is_joined(self):
+        # CHANGELOG переносит длинные пункты, и продолжение — это отступ.
+        # Пока оно отбрасывалось, пользователь читал обрывок фразы.
+        body = (
+            "### Добавлено\n\n"
+            "- Двойной проход GigaAM и Whisper:\n"
+            "  два независимых прохода и разбор расхождений.\n"
+            "- Короткий пункт.\n"
+        )
+        notes = check_update.extract_notes(body)
+        self.assertEqual(
+            notes,
+            [
+                "Двойной проход GigaAM и Whisper: два независимых прохода и разбор расхождений.",
+                "Короткий пункт.",
+            ],
+        )
+
+    def test_heading_after_bullet_does_not_glue_to_it(self):
+        body = "- Пункт один.\n\n### Исправлено\n\n- Пункт два.\n"
+        self.assertEqual(check_update.extract_notes(body), ["Пункт один.", "Пункт два."])
+
+    def test_joined_bullet_is_truncated(self):
+        body = "- {}\n  {}\n".format("я" * 80, "ю" * 80)
+        note = check_update.extract_notes(body)[0]
+        self.assertLessEqual(len(note), check_update.MAX_NOTE_CHARS)
+        self.assertTrue(note.endswith("…"))
+
+    def test_real_changelog_bullets_survive_the_round_trip(self):
+        # Тело релиза делается из CHANGELOG этого репозитория, так что
+        # проверяем парсер ровно на нём, а не на выдуманной разметке.
+        changelog = SCRIPT.resolve().parents[1] / "CHANGELOG.md"
+        body = changelog.read_text(encoding="utf-8").split("## [1.0.0]", 1)[1]
+        for note in check_update.extract_notes(body):
+            self.assertNotIn("\n", note)
+            self.assertTrue(
+                note.rstrip().endswith((".", "…", ":")) or len(note) >= check_update.MAX_NOTE_CHARS - 1,
+                "пункт оборван на середине: {!r}".format(note),
+            )
+
     def test_notes_are_capped(self):
         body = "\n".join("- пункт {}".format(index) for index in range(20))
         self.assertEqual(len(check_update.extract_notes(body)), check_update.MAX_NOTES)
@@ -108,6 +148,17 @@ class NotesTests(unittest.TestCase):
 
 
 class CheckFlowTests(unittest.TestCase):
+    def test_notice_names_the_checked_copy_not_the_module_directory(self):
+        # Сообщение печатало каталог самого скрипта, из-за чего в проверке на
+        # чужой копии пользователю называли бы не тот путь.
+        with TempInstall() as install:
+            (install.skill_dir / ".git").mkdir()
+            notice = check_update.check(
+                env=install.env, skill_dir=install.skill_dir, fetch=lambda: RELEASE
+            )
+        self.assertIn(str(install.skill_dir), notice)
+        self.assertNotIn(str(check_update.SKILL_DIR), notice)
+
     def test_new_release_produces_notice_and_caches_it(self):
         with TempInstall() as install:
             notice = check_update.check(
