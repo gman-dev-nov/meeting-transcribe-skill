@@ -355,6 +355,67 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(device, "mps")
         self.assertEqual(run.call_args.args[0][0], "/venv/bin/python")
 
+    def test_sequential_runs_gigaam_before_whisper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "order.txt"
+            statuses = dual.run_sequential(
+                {
+                    "whisper": [sys.executable, "-c",
+                                f"open({str(marker)!r}, 'a').write('whisper\\n')"],
+                    "gigaam": [sys.executable, "-c",
+                               f"open({str(marker)!r}, 'a').write('gigaam\\n')"],
+                },
+                Path(temporary),
+            )
+
+            self.assertEqual(statuses, {"gigaam": 0, "whisper": 0})
+            self.assertEqual(marker.read_text().split(), ["gigaam", "whisper"])
+
+    def test_sequential_does_not_overlap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            started = time.monotonic()
+            dual.run_sequential(
+                {
+                    "gigaam": [sys.executable, "-c", "import time; time.sleep(0.5)"],
+                    "whisper": [sys.executable, "-c", "import time; time.sleep(0.5)"],
+                },
+                Path(temporary),
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertGreater(elapsed, 0.9)
+
+    def test_sequential_skips_the_second_pass_after_a_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "ran.txt"
+            statuses = dual.run_sequential(
+                {
+                    "gigaam": [sys.executable, "-c", "raise SystemExit(7)"],
+                    "whisper": [sys.executable, "-c",
+                                f"open({str(marker)!r}, 'w').write('x')"],
+                },
+                Path(temporary),
+            )
+
+            self.assertEqual(statuses, {"gigaam": 7})
+            self.assertNotIn("whisper", statuses)
+            self.assertFalse(marker.exists())
+
+    def test_sequential_writes_a_log_per_engine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            dual.run_sequential(
+                {
+                    "gigaam": [sys.executable, "-c", "print('гигаам работает')"],
+                    "whisper": [sys.executable, "-c", "print('виспер работает')"],
+                },
+                Path(temporary),
+            )
+
+            self.assertIn("гигаам работает",
+                          (Path(temporary) / "gigaam.log").read_text(encoding="utf-8"))
+            self.assertIn("виспер работает",
+                          (Path(temporary) / "whisper.log").read_text(encoding="utf-8"))
+
     def test_processes_really_overlap(self):
         with tempfile.TemporaryDirectory() as temporary:
             started = time.monotonic()

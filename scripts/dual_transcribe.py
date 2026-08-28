@@ -708,6 +708,54 @@ def _terminate_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+ENGINE_ORDER = ("gigaam", "whisper")
+
+
+def run_sequential(commands: dict[str, list[str]], log_dir: Path) -> dict[str, int]:
+    """Прогнать движки по очереди, GigaAM первым — он в разы быстрее.
+
+    Это дефолт. На машине с общей памятью параллельный запуск проигрывает
+    катастрофически: замер на 16 ГБ дал 1:53:48 у Whisper против 8:57 у того
+    же прохода в одиночку (выход в своп, из которого процесс не возвращается
+    даже после того, как GigaAM освободил ресурсы). Выигрыш параллельности
+    здесь ограничен временем более быстрого движка — около минуты на
+    24-минутной записи, — поэтому размен невыгоден.
+
+    GigaAM идёт первым, чтобы отказ окружения всплывал через пару минут, а не
+    после двадцатиминутного прохода Whisper.
+    """
+    statuses: dict[str, int] = {}
+    for name in ENGINE_ORDER:
+        command = commands.get(name)
+        if command is None:
+            continue
+        print(f"[{name}] запуск: {' '.join(command)}", flush=True)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=(os.name == "posix"),
+        )
+        try:
+            _pump_output(name, process, log_dir / f"{name}.log")
+            statuses[name] = int(process.wait())
+        except BaseException:
+            _terminate_process(process)
+            raise
+        if statuses[name] != 0:
+            # Второй проход не запускаем: пару всё равно нельзя опубликовать.
+            print(
+                f"[{name}] завершился с кодом {statuses[name]}; "
+                "второй проход не запускаю",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
+    return statuses
+
+
 def run_parallel(commands: dict[str, list[str]], log_dir: Path) -> dict[str, int]:
     processes: dict[str, subprocess.Popen] = {}
     threads: list[threading.Thread] = []
@@ -1050,8 +1098,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         with tempfile.TemporaryDirectory(prefix=".meeting-dual-", dir=output_dir) as temporary:
             staging = Path(temporary)
             commands = build_asr_commands(args, staging)
-            print("Запускаю два полных ASR-прохода параллельно.", flush=True)
-            statuses = run_parallel(commands, staging)
+            if args.parallel:
+                print(
+                    "Запускаю два полных ASR-прохода параллельно. "
+                    "На машине с общей памятью это может выйти многократно "
+                    "медленнее последовательного запуска.",
+                    flush=True,
+                )
+                statuses = run_parallel(commands, staging)
+            else:
+                print(
+                    "Запускаю два полных ASR-прохода по очереди: GigaAM, затем Whisper.",
+                    flush=True,
+                )
+                statuses = run_sequential(commands, staging)
             failed = {name: code for name, code in statuses.items() if code != 0}
             if failed:
                 print(f"ERROR: ASR завершился с ошибкой: {failed}", file=sys.stderr)
@@ -1184,6 +1244,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-backend",
         choices=["whisper-cpp", "mlx-whisper", "faster-whisper"],
         default=None,
+    )
+    run.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Запускать оба движка одновременно. По умолчанию они идут по "
+             "очереди: на машине с общей памятью параллельный запуск даёт "
+             "многократное замедление при выигрыше в минуту.",
     )
     run.add_argument("--initial-prompt", default=None)
     run.add_argument("--no-condition-on-previous-text", action="store_true")
