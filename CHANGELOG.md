@@ -9,6 +9,13 @@
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-08-28
+
+### Исправлено
+
+- Пункт списка изменений, перенесённый в CHANGELOG на несколько строк, больше не обрывается на середине фразы в уведомлении об обновлении.
+- В уведомлении называется каталог проверяемой копии скилла, а не каталог, из которого запущен скрипт.
+
 ## [1.0.0] — 2026-08-28
 
 Первая версия с номером. Фиксирует состояние скилла на момент появления
@@ -32,5 +39,6 @@
 - Проверка обновлений выключается целиком:
   `MEETING_TRANSCRIBE_NO_UPDATE_CHECK=1`.
 
-[Unreleased]: https://github.com/gman-dev-nov/meeting-transcribe-skill/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/gman-dev-nov/meeting-transcribe-skill/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/gman-dev-nov/meeting-transcribe-skill/releases/tag/v1.0.1
 [1.0.0]: https://github.com/gman-dev-nov/meeting-transcribe-skill/releases/tag/v1.0.0
