@@ -204,10 +204,24 @@ class CheckFlowTests(unittest.TestCase):
             )
         self.assertIn("9.9.9", notice)
 
-    def test_missing_version_file_stays_silent(self):
+    def test_copy_without_version_file_is_treated_as_outdated(self):
+        # Копии, поставленные до появления версионирования, — это ровно те
+        # пользователи, ради которых проверка задумана. Молчание для них
+        # означало бы, что о релизах они не узнают никогда.
         with TempInstall(version=None) as install:
             notice = check_update.check(
                 env=install.env, skill_dir=install.skill_dir, fetch=lambda: RELEASE
+            )
+        self.assertIsNotNone(notice)
+        self.assertIn("9.9.9", notice)
+        self.assertIn("неизвестная", notice)
+
+    def test_unparsable_remote_version_stays_silent_without_local_version(self):
+        with TempInstall(version=None) as install:
+            notice = check_update.check(
+                env=install.env,
+                skill_dir=install.skill_dir,
+                fetch=lambda: dict(RELEASE, tag_name="latest"),
             )
         self.assertIsNone(notice)
 
@@ -255,8 +269,11 @@ class InstallKindTests(unittest.TestCase):
         # Раскладки плагинов нет в публичной документации, поэтому реестр
         # маркетплейсов — сигнал, не зависящий от угаданного пути.
         with TempInstall() as install:
-            storage = install.home / "elsewhere" / "market"
-            skill = storage / "plugins" / "meeting-transcribe"
+            # Не ~/.claude/plugins: путевое соглашение тут не сработало бы,
+            # реестр — сработает. При этом сам installLocation остаётся
+            # правдоподобным каталогом хранилища плагинов.
+            storage = install.home / "elsewhere" / "plugins" / "market"
+            skill = storage / "meeting-transcribe"
             skill.mkdir(parents=True)
             registry = install.home / ".claude" / "plugins" / "known_marketplaces.json"
             registry.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +283,24 @@ class InstallKindTests(unittest.TestCase):
             kind, detail = check_update.detect_install(skill, install.env)
         self.assertEqual(kind, "plugin")
         self.assertIn(str(storage), detail)
+
+    def test_overly_broad_marketplace_location_is_ignored(self):
+        # Патологический installLocation (корень, домашний каталог) объявил бы
+        # плагином любой клон на машине и необратимо отключил бы --update.
+        for location in ("/", "~", "{home}", "{home}/projects"):
+            with self.subTest(location=location):
+                with TempInstall() as install:
+                    (install.skill_dir / ".git").mkdir()
+                    registry = install.home / ".claude" / "plugins" / "known_marketplaces.json"
+                    registry.parent.mkdir(parents=True, exist_ok=True)
+                    registry.write_text(
+                        json.dumps(
+                            {"m": {"installLocation": location.format(home=install.home)}}
+                        ),
+                        encoding="utf-8",
+                    )
+                    kind, _ = check_update.detect_install(install.skill_dir, install.env)
+                self.assertEqual(kind, "git")
 
     def test_broken_marketplace_registry_is_ignored(self):
         with TempInstall() as install:

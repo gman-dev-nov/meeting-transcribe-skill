@@ -221,6 +221,22 @@ def _is_inside(path, parent):
     return path == parent or parent in path.parents
 
 
+def _plausible_plugin_location(location):
+    """Похоже ли значение из реестра на каталог хранилища плагинов.
+
+    `Path.parents` включает корень, поэтому патологический installLocation
+    (`/`, домашний каталог) объявил бы плагином любой клон на машине и тихо,
+    необратимо отключил бы `--update` — правкой чужого файла, которую
+    пользователь не увидит. Реестр читается как подсказка, а не как истина:
+    доверяем значению, только если оно само выглядит как каталог плагинов.
+    """
+    try:
+        parts = Path(location).parts
+    except Exception:
+        return False
+    return "plugins" in parts and len(parts) > 2
+
+
 def _marketplace_locations(env):
     """installLocation всех известных маркетплейсов. Best-effort."""
     try:
@@ -230,7 +246,7 @@ def _marketplace_locations(env):
         locations = []
         for entry in (data or {}).values():
             location = (entry or {}).get("installLocation")
-            if location:
+            if location and _plausible_plugin_location(location):
                 locations.append(str(location))
         return locations
     except Exception:
@@ -384,7 +400,15 @@ def check(force=False, env=None, skill_dir=SKILL_DIR, fetch=fetch_latest_release
         return None
 
     installed = local_version(skill_dir)
-    if not is_newer(summary.get("version"), installed):
+    if installed is None:
+        # Копия без VERSION поставлена до того, как версионирование появилось,
+        # то есть заведомо старее любого релиза. Молчать тут значило бы, что
+        # ровно те пользователи, ради которых задумана проверка, не узнают о
+        # новых версиях никогда: файла VERSION в их копии нет и не появится,
+        # пока они не обновятся.
+        if parse_version(summary.get("version")) is None:
+            return None
+    elif not is_newer(summary.get("version"), installed):
         return None
 
     install_kind, _ = detect_install(skill_dir, env)
