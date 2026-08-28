@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError, URLError
 
 
@@ -236,6 +237,58 @@ class InstallKindTests(unittest.TestCase):
             kind, _ = check_update.detect_install(plugin_dir, {})
         self.assertEqual(kind, "plugin")
 
+    def test_symlinked_plugin_storage_is_still_a_plugin(self):
+        # Если платформа начнёт симлинкать хранилище, проверка только по
+        # разрешённому пути перестала бы видеть плагин и разрешила бы git pull
+        # в каталоге, которым распоряжается платформа.
+        with TempInstall() as install:
+            real = install.home / "storage" / "meeting-transcribe"
+            real.mkdir(parents=True)
+            link_parent = install.home / ".claude" / "plugins" / "marketplaces"
+            link_parent.mkdir(parents=True)
+            link = link_parent / "meeting-transcribe"
+            link.symlink_to(real, target_is_directory=True)
+            kind, _ = check_update.detect_install(link, {})
+        self.assertEqual(kind, "plugin")
+
+    def test_marketplace_registry_wins_over_missing_path_convention(self):
+        # Раскладки плагинов нет в публичной документации, поэтому реестр
+        # маркетплейсов — сигнал, не зависящий от угаданного пути.
+        with TempInstall() as install:
+            storage = install.home / "elsewhere" / "market"
+            skill = storage / "plugins" / "meeting-transcribe"
+            skill.mkdir(parents=True)
+            registry = install.home / ".claude" / "plugins" / "known_marketplaces.json"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(
+                json.dumps({"m": {"installLocation": str(storage)}}), encoding="utf-8"
+            )
+            kind, detail = check_update.detect_install(skill, install.env)
+        self.assertEqual(kind, "plugin")
+        self.assertIn(str(storage), detail)
+
+    def test_broken_marketplace_registry_is_ignored(self):
+        with TempInstall() as install:
+            registry = install.home / ".claude" / "plugins" / "known_marketplaces.json"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text("{не json", encoding="utf-8")
+            kind, _ = check_update.detect_install(install.skill_dir, install.env)
+        self.assertEqual(kind, "plain")
+
+    def test_ordinary_clone_outside_plugin_storage_is_git(self):
+        with TempInstall() as install:
+            (install.skill_dir / ".git").mkdir()
+            kind, _ = check_update.detect_install(install.skill_dir, install.env)
+        self.assertEqual(kind, "git")
+
+    def test_git_clone_inside_plugin_storage_is_still_a_plugin(self):
+        with TempInstall() as install:
+            plugin_dir = install.home / ".claude" / "plugins" / "marketplaces" / "mt"
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / ".git").mkdir()
+            kind, _ = check_update.detect_install(plugin_dir, {})
+        self.assertEqual(kind, "plugin")
+
     def test_plugin_install_is_not_offered_a_git_pull(self):
         with TempInstall() as install:
             plugin_dir = install.home / ".claude" / "plugins" / "marketplaces" / "mt"
@@ -284,6 +337,39 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("detached HEAD", message)
 
+    def test_successful_fast_forward_reports_new_version(self):
+        # Единственный сценарий, где действительно выполняется git pull:
+        # проверяем его на настоящем клоне, вместе с флагами обёртки.
+        with TempInstall() as install:
+            upstream = Path(install.home) / "upstream"
+            upstream.mkdir()
+            (upstream / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+            self._git_init(upstream)
+
+            clone = Path(install.home) / "clone"
+            self._git(["clone", "-q", str(upstream), str(clone)])
+
+            (upstream / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+            self._git(["-C", str(upstream), "add", "-A"])
+            self._git(["-C", str(upstream), "commit", "-qm", "release"])
+
+            code, message = check_update.run_update(clone, {})
+
+        self.assertEqual(code, 0, message)
+        self.assertIn("0.2.0", message)
+        self.assertIn("следующей сессии", message)
+
+    @staticmethod
+    def _git(args):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+        subprocess.run(
+            ["git"] + list(args),
+            check=True,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     @staticmethod
     def _git_init(path):
         env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
@@ -302,6 +388,35 @@ class UpdateTests(unittest.TestCase):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+
+class GitWrapperTests(unittest.TestCase):
+    def test_git_runs_without_inherited_stdin_and_without_prompts(self):
+        # Промпт за паролем или за незнакомым SSH-ключом не должен вешать
+        # сессию: stdin закрыт, GIT_TERMINAL_PROMPT=0.
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured.update(kwargs)
+            captured["command"] = command
+
+            class Result:
+                returncode = 0
+                stdout = ""
+
+            return Result()
+
+        with mock.patch.object(check_update.subprocess, "run", fake_run):
+            check_update.git(["status", "--porcelain"], "/nowhere")
+
+        self.assertEqual(captured["stdin"], check_update.subprocess.DEVNULL)
+        self.assertEqual(captured["env"]["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_pull_recurses_submodules(self):
+        # Без флага сдвиг указателя сабмодуля в релизе оставил бы сабмодуль на
+        # старом коммите, и предварительный git status этого уже не поймал бы.
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('"pull", "--ff-only", "--recurse-submodules"', source)
 
 
 class CliTests(unittest.TestCase):

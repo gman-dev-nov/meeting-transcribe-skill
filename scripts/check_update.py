@@ -46,6 +46,13 @@ MAX_NOTE_CHARS = 120
 # поэтому он статичен и не содержит ничего о машине пользователя.
 USER_AGENT = "meeting-transcribe-skill update check"
 
+# Реестр маркетплейсов Claude Code: каждый элемент несёт installLocation —
+# каталог, куда платформа положила свою копию. Это единственный источник о
+# плагинной раскладке, который не приходится угадывать (в публичной
+# документации её нет), поэтому он проверяется первым — но best-effort:
+# файла может не быть или формат может измениться.
+KNOWN_MARKETPLACES = Path(".claude") / "plugins" / "known_marketplaces.json"
+
 
 # --------------------------------------------------------------------------- #
 # Настройки и кеш
@@ -76,7 +83,13 @@ def read_cache(path):
 
 
 def write_cache(path, data):
-    """Записать кеш. Любая ошибка записи не должна ничего ломать."""
+    """Записать кеш. Любая ошибка записи не должна ничего ломать.
+
+    Если каталог кеша недоступен на запись, отметка времени не сохранится и
+    проверка пойдёт в сеть на каждом отчёте. Это осознанный компромисс:
+    отчётов на машине единицы в день, а альтернатива — писать куда-то ещё,
+    не спросив пользователя.
+    """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(str(path), "w", encoding="utf-8") as handle:
@@ -199,6 +212,31 @@ def release_summary(payload):
 # --------------------------------------------------------------------------- #
 
 
+def _is_inside(path, parent):
+    """Лежит ли path внутри parent (или совпадает с ним)."""
+    try:
+        parent = Path(parent)
+    except Exception:
+        return False
+    return path == parent or parent in path.parents
+
+
+def _marketplace_locations(env):
+    """installLocation всех известных маркетплейсов. Best-effort."""
+    try:
+        registry = Path(env.get("HOME", "~")).expanduser() / KNOWN_MARKETPLACES
+        with open(str(registry), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        locations = []
+        for entry in (data or {}).values():
+            location = (entry or {}).get("installLocation")
+            if location:
+                locations.append(str(location))
+        return locations
+    except Exception:
+        return []
+
+
 def detect_install(skill_dir=SKILL_DIR, env=None):
     """('git' | 'plugin' | 'plain', человекочитаемая деталь).
 
@@ -206,37 +244,64 @@ def detect_install(skill_dir=SKILL_DIR, env=None):
     от ручной копии: `git pull` в кеше плагина не наш способ обновления.
     Ручная копия (проверено на реальной машине: ~/.claude/skills/... без .git)
     не обновляется автоматически вообще.
+
+    Раскладки плагинов нет в публичной документации, поэтому сигналов три и
+    любой из них достаточен: реестр маркетплейсов, CLAUDE_PLUGIN_ROOT и
+    само расположение внутри ~/.claude/plugins. Путь проверяется и сырым, и
+    разрешённым: `resolve()` идёт по симлинкам, и если платформа когда-нибудь
+    начнёт симлинкать хранилище, проверка только по разрешённому пути молча
+    перестала бы видеть плагин. Ошибка в эту сторону — `git pull` в каталоге,
+    которым распоряжается платформа, поэтому сомнение трактуется в пользу
+    "plugin".
     """
     env = os.environ if env is None else env
-    path = Path(skill_dir).resolve()
+    raw = Path(skill_dir)
+    try:
+        candidates = [raw, raw.resolve()]
+    except Exception:
+        candidates = [raw]
+
+    for location in _marketplace_locations(env):
+        for candidate in candidates:
+            if _is_inside(candidate, location):
+                return "plugin", "каталог маркетплейса {}".format(location)
 
     plugin_root = env.get("CLAUDE_PLUGIN_ROOT")
     if plugin_root:
-        try:
-            if path == Path(plugin_root).resolve() or Path(plugin_root).resolve() in path.parents:
+        for candidate in candidates:
+            if _is_inside(candidate, plugin_root) or _is_inside(candidate, Path(plugin_root).resolve()):
                 return "plugin", "CLAUDE_PLUGIN_ROOT={}".format(plugin_root)
-        except Exception:
-            pass
 
-    parts = path.parts
-    for index in range(len(parts) - 1):
-        if parts[index] == ".claude" and parts[index + 1] == "plugins":
-            return "plugin", "каталог внутри ~/.claude/plugins"
+    for candidate in candidates:
+        parts = candidate.parts
+        for index in range(len(parts) - 1):
+            if parts[index] == ".claude" and parts[index + 1] == "plugins":
+                return "plugin", "каталог внутри ~/.claude/plugins"
 
-    if (path / ".git").exists():
-        return "git", str(path)
+    resolved = candidates[-1]
+    if (resolved / ".git").exists():
+        return "git", str(resolved)
 
-    return "plain", str(path)
+    return "plain", str(resolved)
 
 
 def git(args, skill_dir=SKILL_DIR):
-    """Обёртка над git в каталоге скилла: (код возврата, stdout+stderr)."""
+    """Обёртка над git в каталоге скилла: (код возврата, stdout+stderr).
+
+    stdin закрыт и терминальные промпты запрещены: иначе `git pull` на
+    незнакомом SSH-ключе или закрытом репозитории повис бы, ожидая ввода в
+    том stdin, который ему достался от вызывающей стороны. Нам нужен быстрый
+    отказ с внятным текстом, а не зависшая сессия.
+    """
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
         result = subprocess.run(
             ["git", "-C", str(skill_dir)] + list(args),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
@@ -301,12 +366,14 @@ def check(force=False, env=None, skill_dir=SKILL_DIR, fetch=fetch_latest_release
         cache["last_check"] = now
         try:
             summary = release_summary(fetch())
-        except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
-            # Офлайн, таймаут, rate limit (60 запросов в час без токена), 404 на
-            # репозитории без релизов, битый JSON — молча. Отметку времени всё
-            # равно сохраняем, чтобы не долбить сеть на каждом отчёте.
-            summary = None
         except Exception:
+            # Офлайн, таймаут, rate limit (60 запросов в час без токена), 404 на
+            # репозитории без релизов, битый JSON, оборванное на середине тело
+            # ответа — молча. Ловим именно `Exception`, а не перечисление типов:
+            # http.client.IncompleteRead не наследует OSError, и любой такой
+            # промах перечисления стоил бы пользователю сообщения об ошибке
+            # поверх готового отчёта. Отметку времени всё равно сохраняем,
+            # чтобы не долбить сеть на каждом отчёте.
             summary = None
         if summary:
             cache["latest"] = summary
@@ -390,11 +457,16 @@ def run_update(skill_dir=SKILL_DIR, env=None):
             "Переключись на ветку вручную и повтори."
         )
 
-    code, output = git(["pull", "--ff-only"], skill_dir)
+    # --recurse-submodules: на репозитории без сабмодулей это no-op, но если
+    # релиз когда-нибудь сдвинет указатель сабмодуля, без флага суперпроект
+    # уехал бы вперёд, а сабмодуль остался на старом коммите — рассогласование,
+    # которое предварительная проверка git status уже не поймала бы.
+    code, output = git(["pull", "--ff-only", "--recurse-submodules"], skill_dir)
     if code != 0:
         return 1, (
             "git pull --ff-only не прошёл — ничего не изменено:\n{}\n"
-            "Разберись с расхождением вручную.".format(output)
+            "Обычные причины: у ветки не настроен upstream, ветка разошлась с "
+            "удалённой или нет доступа к репозиторию. Разберись вручную.".format(output)
         )
 
     version = local_version(skill_dir) or "неизвестная"
