@@ -21,7 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      # write, а не read: без него агенту нечем опубликовать ревью, и джоб
+      # завершается зелёным, ничего не написав.
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -38,7 +40,13 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # --comment обязателен: без него скилл отдаёт находки в вывод джоба,
+          # а на PR не пишет ничего.
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
+          # Без allowedTools публикующие инструменты запрещены, и попытки
+          # прокомментировать PR молча отклоняются (в логе — permission_denials).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
