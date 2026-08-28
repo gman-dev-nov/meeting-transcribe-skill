@@ -2,19 +2,118 @@
 """
 Setup wizard для meeting-transcribe.
 
-Проверяет окружение, помогает выбрать диаризатор, рассказывает про
-особенности Whisper на длинном/шумном/многоголосом аудио.
+Проверяет окружение для двойного GigaAM + Whisper workflow, помогает выбрать
+диаризатор, рассказывает про особенности длинного/шумного аудио.
 
 Запуск:
-    python scripts/setup_check.py
+    python3 scripts/setup_check.py
 """
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def load_transcribe():
+    """Подтянуть transcribe.py, чтобы не повторять его разведку whisper.cpp.
+
+    Список путей к бинарнику и каталогу моделей — единственный источник
+    правды в transcribe.py, потому что именно он определяет, запустится ли
+    транскрипция. Wizard обязан отвечать ровно то же самое: пока он повторял
+    эти пути своим списком, `WHISPER_CPP_MODELS` и вывод каталога моделей из
+    пути бинарника в него не попали, и на таком окружении wizard сообщал
+    «модель не скачана» при полностью рабочем пайплайне.
+
+    В отличие от `resolve_whisper_python`, дублировать тут нечего: без
+    transcribe.py скилла всё равно нет, и это само по себе диагноз.
+    """
+    path = SCRIPT_DIR / "transcribe.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("transcribe_for_setup_check", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # noqa: BLE001 — wizard не должен падать из-за этого
+        print(f"  ⚠️  не удалось прочитать transcribe.py: {exc}", file=sys.stderr)
+        return None
+    return module
+
+
+def whisper_cpp_state(transcribe) -> tuple:
+    """(бинарник найден, максимальная модель на месте) — правилами transcribe.py."""
+    if transcribe is None:
+        return False, False
+    bin_path, models_dir = transcribe.find_whisper_cpp()
+    if not bin_path:
+        return False, False
+    return True, bool(transcribe.whisper_cpp_model_path(models_dir, "large-v3"))
+
+
+def venv_python(name: str) -> Path:
+    if os.name == "nt":
+        return Path.home() / ".venvs" / name / "Scripts" / "python.exe"
+    return Path.home() / ".venvs" / name / "bin" / "python"
+
+
+def resolve_whisper_python() -> Path:
+    """Тот же выбор интерпретатора, что делает dual_transcribe.py.
+
+    Копия намеренная: wizard обязан работать, даже если рядом нет
+    dual_transcribe.py. Совпадение правил закреплено тестом.
+    """
+    configured = os.environ.get("WHISPER_PYTHON")
+    if configured:
+        return Path(configured).expanduser()
+    candidate = venv_python("whisper")
+    if candidate.is_file():
+        return candidate
+    return Path(sys.executable)
+
+
+def probe_imports(python: Path, modules: dict) -> dict:
+    """Проверить импорты в чужом интерпретаторе, а не в своём.
+
+    Wizard могут запустить системным python3, пока пакеты лежат в venv —
+    тогда проверка «у себя» врёт про отсутствие бэкенда.
+    """
+    code = (
+        "import importlib.util, json, sys\n"
+        "names = json.loads(sys.argv[1])\n"
+        "print(json.dumps({k: all(importlib.util.find_spec(m) is not None for m in v)\n"
+        "                  for k, v in names.items()}))"
+    )
+    empty = {key: False for key in modules}
+    try:
+        probe = subprocess.run(
+            [str(python), "-c", code, json.dumps(modules)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return empty
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return empty
+    try:
+        result = json.loads(probe.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return empty
+    return {key: bool(result.get(key)) for key in modules}
 
 
 def header(text: str) -> None:
@@ -47,50 +146,49 @@ def main() -> int:
     # ---- ffmpeg ----
     print("\n1) ffmpeg")
     has_ffmpeg = shutil.which("ffmpeg") is not None
+    has_ffprobe = shutil.which("ffprobe") is not None
     check("ffmpeg в PATH", has_ffmpeg,
-          "macOS: brew install ffmpeg | Linux: sudo apt install ffmpeg")
+          "macOS: brew install ffmpeg | Linux: sudo apt install ffmpeg | "
+          "без brew: статические ffmpeg+ffprobe → ~/.local/bin "
+          "(references/setup.md → «ffmpeg без Homebrew»)")
+    check("ffprobe в PATH", has_ffprobe, "установи тот же пакет ffmpeg")
 
     # ---- whisper backends ----
     print("\n2) Whisper-бэкенды")
 
     # whisper.cpp — рекомендуемый дефолт на Apple Silicon: самый быстрый + честный beam search
-    from pathlib import Path
-    wcpp_paths = [
-        os.environ.get("WHISPER_CPP_BIN", ""),
-        f"{os.environ.get('WHISPER_CPP_HOME', '')}/build/bin/whisper-cli",
-        f"{Path.home()}/whisper.cpp/build/bin/whisper-cli",
-        f"{Path.home()}/.local/share/whisper.cpp/build/bin/whisper-cli",
-        "/usr/local/bin/whisper-cli",
-        "/opt/homebrew/bin/whisper-cli",
-    ]
-    has_wcpp_bin = any(p and Path(p).is_file() for p in wcpp_paths) or shutil.which("whisper-cli") is not None
-    wcpp_models_ok = False
-    if has_wcpp_bin:
-        for cand in [f"{Path.home()}/whisper.cpp/models/ggml-large-v3-turbo.bin",
-                     f"{os.environ.get('WHISPER_CPP_HOME', '')}/models/ggml-large-v3-turbo.bin",
-                     f"{Path.home()}/.local/share/whisper.cpp/models/ggml-large-v3-turbo.bin"]:
-            if cand and Path(cand).is_file():
-                wcpp_models_ok = True
-                break
+    transcribe = load_transcribe()
+    if transcribe is None:
+        print("  ⚠️  scripts/transcribe.py рядом не найден — проверка whisper.cpp невозможна")
+    has_wcpp_bin, wcpp_has_v3 = whisper_cpp_state(transcribe)
+    wcpp_usable = has_wcpp_bin and wcpp_has_v3
 
     check("whisper.cpp (рекомендуемый дефолт на Apple Silicon)", has_wcpp_bin,
           "pip install cmake && git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp && "
           "cd ~/whisper.cpp && cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release && "
           "cmake --build build --config Release -j 8")
     if has_wcpp_bin:
-        check("  ggml-large-v3-turbo.bin (модель)", wcpp_models_ok,
-              "cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3-turbo")
+        if wcpp_has_v3:
+            check("  ggml-large-v3.bin (максимальная модель, ~3 ГБ)", True)
+        else:
+            warn("  ggml-large-v3.bin не скачан — без него скилл не запускает Whisper",
+                 "скачать максимальную модель: "
+                 "cd ~/whisper.cpp && bash models/download-ggml-model.sh large-v3")
 
-    try:
-        import mlx_whisper  # noqa
-        has_mlx = True
-    except ImportError:
-        has_mlx = False
-    try:
-        import faster_whisper  # noqa
-        has_fw = True
-    except ImportError:
-        has_fw = False
+    whisper_python = resolve_whisper_python()
+    whisper_probe = probe_imports(
+        whisper_python,
+        {
+            "mlx": ["mlx_whisper"],
+            "faster": ["faster_whisper"],
+            "resemblyzer": ["resemblyzer", "sklearn"],
+            "pyannote": ["pyannote.audio"],
+        },
+    )
+    has_mlx = whisper_probe["mlx"]
+    has_fw = whisper_probe["faster"]
+    print(f"  ℹ️  Python для Whisper: {whisper_python}")
+    print("      (переопределяется переменной WHISPER_PYTHON)")
 
     if is_apple_silicon:
         check("mlx-whisper (альтернатива; нет beam search)", has_mlx,
@@ -103,22 +201,54 @@ def main() -> int:
         warn("mlx-whisper недоступен на этой платформе",
              "пакет работает только на Apple Silicon (M-чипы), пропусти этот пункт")
 
-    if not (has_wcpp_bin or has_mlx or has_fw):
+    if not (wcpp_usable or has_mlx or has_fw):
         print("\n  ⚠️  Без бэкенда транскрипция не запустится.")
 
+    # ---- GigaAM in its dedicated venv ----
+    print("\n3) GigaAM (первая половина двойной сверки русской речи)")
+    default_gigaam_python = (
+        Path.home() / ".venvs/asr/Scripts/python.exe"
+        if os.name == "nt"
+        else Path.home() / ".venvs/asr/bin/python"
+    )
+    gigaam_python = Path(
+        os.environ.get("GIGAAM_PYTHON", str(default_gigaam_python))
+    ).expanduser()
+    has_gigaam_python = gigaam_python.is_file()
+    check(
+        f"Python для GigaAM: {gigaam_python}",
+        has_gigaam_python,
+        "создай ~/.venvs/asr и установи GigaAM по references/setup.md",
+    )
+    has_gigaam = False
+    if has_gigaam_python:
+        try:
+            probe = subprocess.run(
+                [
+                    str(gigaam_python),
+                    "-c",
+                    "import gigaam, torch, silero_vad; print('ok')",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+            has_gigaam = probe.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            has_gigaam = False
+        check(
+            "gigaam + torch + silero-vad доступны",
+            has_gigaam,
+            "~/.venvs/asr/bin/pip install "
+            "'gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git' "
+            "silero-vad",
+        )
+
     # ---- diarizers ----
-    print("\n3) Диаризация (опционально, для разметки спикеров)")
-    try:
-        import resemblyzer  # noqa
-        import sklearn  # noqa
-        has_resemblyzer = True
-    except ImportError:
-        has_resemblyzer = False
-    try:
-        import pyannote.audio  # noqa
-        has_pyannote = True
-    except ImportError:
-        has_pyannote = False
+    print("\n4) Диаризация (опционально, для разметки спикеров)")
+    has_resemblyzer = whisper_probe["resemblyzer"]
+    has_pyannote = whisper_probe["pyannote"]
 
     has_token = bool(
         os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -139,7 +269,20 @@ def main() -> int:
     # ---- summary ----
     header("Что у тебя получится по умолчанию")
 
-    if has_mlx:
+    # Приоритет в transcribe.py: whisper-cpp → faster-whisper → mlx-whisper.
+    whisper_quality_usable = wcpp_has_v3 or has_mlx or has_fw
+    if has_gigaam and whisper_quality_usable:
+        print("  • Русская речь: параллельные GigaAM + Whisper с LLM-сверкой.")
+    elif whisper_quality_usable:
+        print("  • Русская речь: ⚠️ только Whisper; двойная сверка недоступна без GigaAM.")
+    elif has_gigaam and has_wcpp_bin:
+        print("  • Русская речь: ⚠️ для двойной сверки не хватает Whisper large-v3.")
+    else:
+        print("  • Русская речь: ❌ нет полного набора GigaAM + Whisper.")
+
+    if wcpp_usable:
+        print("  • Транскрипция: whisper.cpp + максимальная large-v3.")
+    elif has_mlx:
         print("  • Транскрипция: mlx-whisper (быстро, ~RTF 0.10 на M-серии).")
     elif has_fw:
         print("  • Транскрипция: faster-whisper (CPU, ~RTF 0.40 на M-серии).")
@@ -215,7 +358,7 @@ HF_TOKEN полностью бесплатный — это просто спо�
     • TV/радио на заднем фоне (попытается транскрибировать всё)
 
     Что помогает:
-    1) Пресет quality (large-v3) заметно устойчивее на грязном аудио.
+    1) Максимальная large-v3 уже закреплена политикой скилла.
     2) Пред-обработка через ffmpeg:
 
          # Шумодав + усиление речи + нормализация громкости
@@ -240,8 +383,7 @@ HF_TOKEN полностью бесплатный — это просто спо�
     1) Резать ffmpeg-ом на 30–60-минутные куски (см. выше) и
        обрабатывать по очереди. Скилл сам соберёт несколько отчётов
        или сведёт их в один по запросу.
-    2) Использовать пресет fast или balanced — сократит время прогона
-       и снизит вероятность залипаний.
+    2) Не уменьшать модель: при нехватке памяти обрабатывать части по очереди.
     3) Не запускать одновременно с другими ресурсоёмкими процессами.
 
 🗣️  ИМЕНА, ТЕРМИНЫ, ЖАРГОН
@@ -254,7 +396,7 @@ HF_TOKEN полностью бесплатный — это просто спо�
     1) initial_prompt — текстовая подсказка модели в начале. Передай
        глоссарий через --initial-prompt:
 
-         python scripts/transcribe.py созвон.mp4 \\
+         python3 scripts/transcribe.py созвон.mp4 \\
            --initial-prompt "Участники: Ирина, Тима, Глеб. \\
                              Проект: Терапия чернилами, k8s, OpenCode."
 
@@ -272,14 +414,17 @@ HF_TOKEN полностью бесплатный — это просто спо�
 
       ffmpeg -i in.m4a -af "loudnorm=I=-16:TP=-1.5:LRA=11" out.wav
 
-🎯  КОГДА КАКОЙ ПРЕСЕТ ВЫБРАТЬ
+🎯  МОДЕЛЬ WHISPER
 
-    quality   — плохое аудио, юр. важные записи, нужны точные имена
-    balanced  — нормальная Zoom-запись, рабочий созвон, дефолт
-    fast      — длинная запись для черновика, пересмотр перед удалением
+    Скилл всегда использует максимальную large-v3 и не предлагает выбор размера.
 """)
 
-    return 0 if (has_ffmpeg and (has_fw or has_mlx)) else 1
+    return 0 if (
+        has_ffmpeg
+        and has_ffprobe
+        and has_gigaam
+        and whisper_quality_usable
+    ) else 1
 
 
 if __name__ == "__main__":

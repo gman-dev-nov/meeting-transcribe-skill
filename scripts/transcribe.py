@@ -2,11 +2,8 @@
 """
 Локальная транскрипция аудио/видео через Whisper.
 
-Пресеты скорости/качества (для часа аудио на M4):
-
-  quality   — large-v3,        beam_size=5  (макс качество)
-  balanced  — large-v3-turbo,  beam_size=5  (рекомендуется по умолчанию)
-  fast      — large-v3-turbo,  beam_size=1  (черновики, минимум)
+Штатная и единственная модель скилла — максимальная Whisper large-v3
+с beam_size=5. Размер модели и beam не являются параметрами CLI.
 
 Бэкенды whisper:
   faster-whisper  — кросс-платформенный (CPU). На M4 даёт ~RTF 0.4–1.0.
@@ -18,9 +15,9 @@
   auto         — pyannote если HF_TOKEN есть, иначе resemblyzer
 
 Использование:
-    python transcribe.py video.mp4 --preset balanced --language ru --diarize
-    python transcribe.py audio.m4a --estimate-only            # только оценка
-    python transcribe.py audio.m4a --preset fast --yes        # без интерактива
+    python3 transcribe.py video.mp4 --language ru --diarize
+    python3 transcribe.py audio.m4a --estimate-only           # только оценка
+    python3 transcribe.py audio.m4a --yes                      # без интерактива
 
 Артефакты сохраняются рядом с исходным файлом:
     <name>.transcript.json
@@ -43,7 +40,7 @@ from pathlib import Path
 from typing import Optional
 
 
-AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".aac"}
+AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".aac", ".aif", ".aiff", ".aifc"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
 
@@ -55,16 +52,6 @@ PRESETS = {
         "beam_size": 5,
         "description": "Максимальное качество (large-v3, beam=5)",
     },
-    "balanced": {
-        "model": "large-v3-turbo",
-        "beam_size": 5,
-        "description": "Сбалансированный (large-v3-turbo, beam=5)",
-    },
-    "fast": {
-        "model": "large-v3-turbo",
-        "beam_size": 1,
-        "description": "Быстрый, для черновиков (large-v3-turbo, beam=1)",
-    },
 }
 
 # Real-time factor: сколько секунд CPU/GPU времени тратится на 1 секунду аудио.
@@ -73,19 +60,13 @@ PRESETS = {
 RTF_TABLE = {
     "faster-whisper": {
         "quality": 0.9,
-        "balanced": 0.40,
-        "fast": 0.20,
     },
     "mlx-whisper": {
         "quality": 0.20,
-        "balanced": 0.10,  # mlx auto-fallback to greedy → effectively as fast
-        "fast": 0.05,
     },
     "whisper-cpp": {
         # Замерено на M4 на 2ч38м файле. Metal-ускоренный, beam search есть.
         "quality": 0.16,
-        "balanced": 0.07,
-        "fast": 0.05,
     },
 }
 
@@ -157,15 +138,11 @@ def fmt_ts(seconds: float) -> str:
 
 
 def fmt_ts_srt(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds - int(seconds)) * 1000))
-    if ms == 1000:
-        ms = 0
-        s += 1
+    # Через целые миллисекунды: округление 59.9996 → 60.0 не даст «00:00:60,000»
+    total_ms = max(0, int(round(seconds * 1000)))
+    h, rem = divmod(total_ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -174,7 +151,9 @@ def check_ffmpeg() -> None:
         print(
             "ERROR: ffmpeg не найден в PATH.\n"
             "  brew install ffmpeg     # macOS\n"
-            "  sudo apt install ffmpeg # Linux",
+            "  sudo apt install ffmpeg # Linux\n"
+            "  без Homebrew: статические ffmpeg+ffprobe → ~/.local/bin"
+            " (references/setup.md → «ffmpeg без Homebrew»)",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -263,7 +242,7 @@ def probe_volume_stats(path: Path) -> dict:
 
 def recommend_preset(duration_sec: float, silence: dict, audio: dict, volume: dict,
                      available_backends: list[str]) -> dict:
-    """Эвристика выбора пресета. Возвращает {preset, backend, warnings, reason}."""
+    """Вернуть фиксированную large-v3 policy и риски конкретной записи."""
     warnings: list[str] = []
     duration_min = duration_sec / 60.0
 
@@ -286,26 +265,14 @@ def recommend_preset(duration_sec: float, silence: dict, audio: dict, volume: di
     if volume.get("mean_db") is not None and volume["mean_db"] < -30:
         warnings.append("quiet_audio")
 
-    # Решение по пресету: чем больше факторов риска — тем выше пресет.
-    # turbo (fast/balanced) на длинных тишинах склонен зацикливаться;
-    # large-v3 (quality) с beam=5 устойчивее.
-    risk_long = "very_long" in warnings or "long_silence_block" in warnings
-    risk_audio = ("low_sample_rate" in warnings or "low_bitrate" in warnings
-                  or "quiet_audio" in warnings)
-
-    if risk_long:
-        preset = "quality"
-    elif "long" in warnings or risk_audio or "high_silence_ratio" in warnings:
-        preset = "balanced"
-    else:
-        preset = "fast"
+    preset = "quality"
 
     # Бэкенд: предпочитаем whisper-cpp (Metal + честный beam search), иначе авто-приоритет
-    backend_order = ["whisper-cpp", "mlx-whisper", "faster-whisper"]
+    backend_order = ["whisper-cpp", "faster-whisper", "mlx-whisper"]
     backend = next((b for b in backend_order if b in available_backends), None)
 
-    # mlx-whisper не умеет beam search — для balanced/quality лучше whisper-cpp или faster-whisper
-    if preset in {"balanced", "quality"} and backend == "mlx-whisper":
+    # mlx-whisper не умеет beam search — для large-v3 лучше whisper.cpp или faster-whisper.
+    if backend == "mlx-whisper":
         switched = False
         for alt in ("whisper-cpp", "faster-whisper"):
             if alt in available_backends:
@@ -321,7 +288,7 @@ def recommend_preset(duration_sec: float, silence: dict, audio: dict, volume: di
     elif "long" in warnings:
         reason_parts.append(f"запись {int(duration_min)} мин")
     if "long_silence_block" in warnings:
-        reason_parts.append(f"есть тишина ≥{int(silence['max_seconds'])}с (риск loop'а на turbo)")
+        reason_parts.append(f"есть тишина ≥{int(silence['max_seconds'])}с (риск loop'а)")
     if "high_silence_ratio" in warnings:
         reason_parts.append(f"тишины {int(silence_ratio*100)}%")
     if "low_sample_rate" in warnings:
@@ -336,10 +303,10 @@ def recommend_preset(duration_sec: float, silence: dict, audio: dict, volume: di
     # Авто-выставляем --no-condition-on-previous-text для таких записей.
     no_condition = "long_silence_block" in warnings or "high_silence_ratio" in warnings
 
+    reason = "Использую максимальную Whisper large-v3 (quality)"
     if reason_parts:
-        reason = f"Рекомендую {preset}: " + ", ".join(reason_parts) + "."
-    else:
-        reason = f"Рекомендую {preset}: запись короткая и чистая, turbo справится."
+        reason += "; " + ", ".join(reason_parts)
+    reason += "."
 
     return {
         "preset": preset,
@@ -356,7 +323,9 @@ def build_analysis(path: Path, duration: float, env: dict) -> dict:
     silence = probe_silence_stats(path)
     volume = probe_volume_stats(path)
     available = []
-    if env.get("whisper_cpp_bin"):
+    if env.get("whisper_cpp_bin") and whisper_cpp_model_path(
+        env.get("whisper_cpp_models_dir"), "large-v3"
+    ):
         available.append("whisper-cpp")
     if env["mlx_whisper"]:
         available.append("mlx-whisper")
@@ -418,12 +387,6 @@ def find_whisper_cpp() -> tuple[Optional[str], Optional[str]]:
 
 WCPP_MODEL_FILES = {
     "large-v3": "ggml-large-v3.bin",
-    "large-v3-turbo": "ggml-large-v3-turbo.bin",
-    "large-v2": "ggml-large-v2.bin",
-    "medium": "ggml-medium.bin",
-    "small": "ggml-small.bin",
-    "base": "ggml-base.bin",
-    "tiny": "ggml-tiny.bin",
 }
 
 
@@ -629,8 +592,14 @@ def transcribe_whisper_cpp(
         ]
         if initial_prompt:
             cmd.extend(["--prompt", initial_prompt])
-        if word_timestamps:
-            cmd.append("-otoken")  # token-level (closest to word-level)
+        # Слов-уровень НЕ требует отдельного флага: `-ojf` уже кладёт в JSON
+        # per-token `{text, p, offsets}`, из которых слова собираются в
+        # _tokens_to_words(). Раньше здесь добавлялся `-otoken` — такого флага
+        # в whisper-cli нет, а на неизвестном аргументе он печатает usage и
+        # делает exit(0) (examples/cli/cli.cpp:225-227), то есть возвращает код
+        # УСПЕХА. Проверка returncode это не ловила, и путь --diarize с pyannote
+        # (transcribe.py:1256 включает word_timestamps) падал позже на
+        # отсутствующем JSON.
         if not condition_on_previous_text:
             # --max-context 0: запрещает прокидывать предыдущий текст как promt в новое окно.
             # Лечит залипания вида «Так./Видно?» после длинных тишин — критично для
@@ -642,6 +611,16 @@ def transcribe_whisper_cpp(
         if proc.returncode != 0:
             print(
                 f"whisper-cli failed (rc={proc.returncode}):\n{proc.stderr[-2000:]}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # whisper-cli выходит с кодом 0 и на ошибках разбора аргументов, поэтому
+        # returncode недостаточно — ловим usage-выхлоп явно.
+        if "error: unknown argument" in proc.stderr:
+            bad = proc.stderr.split("error: unknown argument:", 1)[1].splitlines()[0].strip()
+            print(
+                f"ERROR: whisper-cli не понял аргумент {bad!r} (вышел с кодом 0).\n"
+                f"Версия whisper.cpp несовместима с командой, собранной скриптом.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -665,8 +644,69 @@ def transcribe_whisper_cpp(
         text = s.get("text", "").strip()
         if not text:
             continue
-        out.append(Segment(start=start_ms / 1000.0, end=end_ms / 1000.0, text=text))
+        words = _tokens_to_words(s.get("tokens") or []) if word_timestamps else []
+        out.append(
+            Segment(start=start_ms / 1000.0, end=end_ms / 1000.0, text=text, words=words)
+        )
     return out
+
+
+def _tokens_to_words(tokens: list) -> list[dict]:
+    """Собрать слова из per-token вывода whisper.cpp (`-ojf`).
+
+    whisper.cpp отдаёт BPE-куски; новое слово начинается с куска, у которого
+    текст стартует с пробела. Служебные маркеры (`[_BEG_]`, `[_TT_123]`) текста
+    не несут и пропускаются. Уверенность слова — среднее `p` его токенов;
+    она нужна гибридной сверке, чтобы ранжировать спорные места.
+
+    Границы приводятся к монотонным. Без `--dtw` whisper.cpp регулярно отдаёт
+    первым токенам сегмента `from` начала сегмента, а `to` — раньше него: на
+    24-минутном созвоне так получилось 172 слова с `end < start`. Сверка такие
+    тайминги отвергает целиком, поэтому чиним здесь — не выдумывая интервалы,
+    а только запрещая слову начинаться раньше конца предыдущего и кончаться
+    раньше собственного начала.
+    """
+    words: list[dict] = []
+    cur_text = ""
+    cur_start: Optional[int] = None
+    cur_end: Optional[int] = None
+    cur_probs: list[float] = []
+
+    def commit() -> None:
+        nonlocal cur_text, cur_start, cur_end, cur_probs
+        text = cur_text.strip()
+        if text and cur_start is not None:
+            start_ms = cur_start
+            end_ms = cur_end if cur_end is not None else start_ms
+            if words:
+                previous_end_ms = int(round(words[-1]["end"] * 1000))
+                start_ms = max(start_ms, previous_end_ms)
+            end_ms = max(end_ms, start_ms)
+            words.append({
+                "start": round(start_ms / 1000.0, 3),
+                "end": round(end_ms / 1000.0, 3),
+                "word": text,
+                "conf": round(sum(cur_probs) / len(cur_probs), 4) if cur_probs else None,
+            })
+        cur_text, cur_start, cur_end, cur_probs = "", None, None, []
+
+    for tok in tokens:
+        text = tok.get("text", "")
+        if text.startswith("[_") and text.endswith("]"):
+            continue
+        if text.startswith(" ") and cur_text:
+            commit()
+        offs = tok.get("offsets") or {}
+        if cur_start is None:
+            cur_start = offs.get("from", 0)
+        cur_end = offs.get("to", cur_end)
+        cur_text += text
+        p = tok.get("p")
+        if isinstance(p, (int, float)):
+            cur_probs.append(float(p))
+
+    commit()
+    return words
 
 
 def transcribe_mlx_whisper(
@@ -685,13 +725,7 @@ def transcribe_mlx_whisper(
         sys.exit(3)
 
     mlx_repo_map = {
-        "tiny": "mlx-community/whisper-tiny",
-        "base": "mlx-community/whisper-base",
-        "small": "mlx-community/whisper-small",
-        "medium": "mlx-community/whisper-medium",
-        "large-v2": "mlx-community/whisper-large-v2-mlx",
         "large-v3": "mlx-community/whisper-large-v3-mlx",
-        "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
     }
     repo = mlx_repo_map.get(model_name, model_name)
 
@@ -738,13 +772,75 @@ def transcribe_mlx_whisper(
     return out
 
 
+# -------------- ДИАРИЗАЦИЯ: общая привязка --------------
+
+# Диаризация даёт интервалы «здесь говорит такой-то» — они не зависят от того,
+# каким ASR получен транскрипт. Поэтому спикеры считаются один раз, а
+# раскладываются по любому числу транскриптов: у GigaAM и Whisper сегменты
+# разной длины, но метки после этого сопоставимы между собой.
+Span = tuple  # (start: float, end: float, label: str)
+
+
+def assign_speakers(
+    segments: list[Segment], spans: list[Span], *, backfill: bool = False
+) -> int:
+    """Проставить сегментам спикера по максимальному перекрытию с интервалами.
+
+    `backfill` наследует метку от ближайшего соседа тем сегментам, которые не
+    пересеклись ни с одним интервалом. Это поведение resemblyzer, который
+    пропускает слишком короткие куски; у pyannote отсутствие перекрытия обычно
+    означает не-речь, и выдумывать там спикера не нужно.
+    """
+    label_remap: dict = {}
+    next_id = 0
+    ordered = sorted(spans, key=lambda item: item[0])
+    for seg in segments:
+        best_label = None
+        best_overlap = 0.0
+        for s_start, s_end, label in ordered:
+            overlap = max(0.0, min(seg.end, s_end) - max(seg.start, s_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_label = label
+        if best_label is not None:
+            if best_label not in label_remap:
+                label_remap[best_label] = f"SPEAKER_{next_id:02d}"
+                next_id += 1
+            seg.speaker = label_remap[best_label]
+    if backfill:
+        for index, seg in enumerate(segments):
+            if seg.speaker is not None:
+                continue
+            neighbours = list(range(index - 1, -1, -1)) + list(
+                range(index + 1, len(segments))
+            )
+            for other in neighbours:
+                if segments[other].speaker:
+                    seg.speaker = segments[other].speaker
+                    break
+    return len(label_remap)
+
+
+def spans_from_labelled_segments(
+    segments: list[Segment], indices: list[int], labels
+) -> list[Span]:
+    """Склеить соседние сегменты одного кластера в интервалы спикера."""
+    spans: list[Span] = []
+    for index, label in zip(indices, labels):
+        seg = segments[index]
+        if spans and spans[-1][2] == str(label):
+            spans[-1] = (spans[-1][0], max(spans[-1][1], seg.end), spans[-1][2])
+        else:
+            spans.append((seg.start, seg.end, str(label)))
+    return spans
+
+
 # -------------- ДИАРИЗАЦИЯ: pyannote --------------
 
-def diarize_pyannote(
+def pyannote_spans(
     audio_path: Path,
-    segments: list[Segment],
     num_speakers: Optional[int],
-) -> int:
+) -> list[Span]:
     try:
         from pyannote.audio import Pipeline
     except ImportError:
@@ -823,41 +919,38 @@ def diarize_pyannote(
     # pyannote 4.x returns DiarizeOutput; .speaker_diarization is the
     # Annotation. pyannote 3.x returns the Annotation directly.
     diarization = getattr(diarization, "speaker_diarization", diarization)
-    spans = []
+    spans: list[Span] = []
     for turn, _, label in diarization.itertracks(yield_label=True):
         spans.append((turn.start, turn.end, label))
     spans.sort(key=lambda x: x[0])
     speakers = sorted({s[2] for s in spans})
     print(f"[pyannote] найдено спикеров: {len(speakers)}", flush=True)
+    return spans
 
-    # Привязываем спикера к каждому сегменту по максимальному перекрытию
-    label_remap = {}
-    next_id = 0
-    for seg in segments:
-        best_label = None
-        best_overlap = 0.0
-        for s_start, s_end, label in spans:
-            overlap = max(0.0, min(seg.end, s_end) - max(seg.start, s_start))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_label = label
-        if best_label is not None:
-            if best_label not in label_remap:
-                label_remap[best_label] = f"SPEAKER_{next_id:02d}"
-                next_id += 1
-            seg.speaker = label_remap[best_label]
 
-    return len(label_remap)
+def diarize_pyannote(
+    audio_path: Path,
+    segments: list[Segment],
+    num_speakers: Optional[int],
+) -> int:
+    return assign_speakers(segments, pyannote_spans(audio_path, num_speakers))
 
 
 # -------------- ДИАРИЗАЦИЯ: resemblyzer --------------
 
-def diarize_resemblyzer(
+def resemblyzer_spans(
     audio_path: Path,
     segments: list[Segment],
     num_speakers: Optional[int],
     max_speakers: int = 6,
-) -> int:
+) -> list[Span]:
+    """Кластеризовать эмбеддинги сегментов и свернуть их в интервалы спикеров.
+
+    Resemblyzer, в отличие от pyannote, считает эмбеддинги по готовым
+    сегментам, поэтому «основой» для общего прохода берётся самый дробный
+    транскрипт — интервалы получаются настолько granular, насколько позволяет
+    его сегментация.
+    """
     try:
         import numpy as np
         from resemblyzer import VoiceEncoder, preprocess_wav
@@ -894,7 +987,7 @@ def diarize_resemblyzer(
         print(f"[resemblyzer] пропущено коротких: {skipped}", flush=True)
     if not embeds:
         print("[resemblyzer] нет валидных эмбеддингов — пропускаю диаризацию", file=sys.stderr)
-        return 0
+        return []
 
     embeds_np = np.vstack(embeds)
 
@@ -928,28 +1021,17 @@ def diarize_resemblyzer(
             labels, chosen_k = best_labels, best_k
             print(f"[resemblyzer] выбрано {chosen_k} спикер(ов), silhouette={best_score:.3f}", flush=True)
 
-    label_to_speaker = {}
-    next_id = 0
-    for idx, lbl in zip(indices, labels):
-        if lbl not in label_to_speaker:
-            label_to_speaker[lbl] = f"SPEAKER_{next_id:02d}"
-            next_id += 1
-        segments[idx].speaker = label_to_speaker[lbl]
+    return spans_from_labelled_segments(segments, indices, labels)
 
-    # пробросить пропущенным короткие сегменты — спикер от соседа
-    for i, seg in enumerate(segments):
-        if seg.speaker is None:
-            for j in range(i - 1, -1, -1):
-                if segments[j].speaker:
-                    seg.speaker = segments[j].speaker
-                    break
-            else:
-                for j in range(i + 1, len(segments)):
-                    if segments[j].speaker:
-                        seg.speaker = segments[j].speaker
-                        break
 
-    return chosen_k
+def diarize_resemblyzer(
+    audio_path: Path,
+    segments: list[Segment],
+    num_speakers: Optional[int],
+    max_speakers: int = 6,
+) -> int:
+    spans = resemblyzer_spans(audio_path, segments, num_speakers, max_speakers)
+    return assign_speakers(segments, spans, backfill=True)
 
 
 # -------------- АРТЕФАКТЫ --------------
@@ -972,7 +1054,13 @@ def write_markdown(segments: list[Segment], meta: dict, out_path: Path) -> None:
         f"# Транскрипт: {meta.get('source_file', '')}",
         "",
         f"- Длительность: {meta.get('duration_hms', '?')}",
-        f"- Модель: {meta.get('model', '?')} (preset={meta.get('preset', '?')}, backend={meta.get('backend', '?')})",
+        (
+            f"- Модель: {meta.get('model', '?')} (движок={meta['engine']}, "
+            f"VAD={meta.get('vad', '?')}, device={meta.get('device', '?')})"
+            if meta.get("engine")
+            else f"- Модель: {meta.get('model', '?')} "
+                 f"(preset={meta.get('preset', '?')}, backend={meta.get('backend', '?')})"
+        ),
         f"- Язык: {meta.get('language', '?')}",
     ]
     if meta.get("speakers_detected"):
@@ -1008,24 +1096,85 @@ def write_srt(segments: list[Segment], out_path: Path) -> None:
     print(f"[write] {out_path.name}", flush=True)
 
 
+def load_segments(path: Path) -> tuple[list[Segment], dict]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    segments = [
+        Segment(
+            start=float(item["start"]),
+            end=float(item["end"]),
+            text=str(item.get("text", "")),
+            speaker=item.get("speaker"),
+            words=item.get("words") or [],
+        )
+        for item in data.get("segments", [])
+    ]
+    return segments, data.get("metadata") or {}
+
+
+def apply_shared_diarization(
+    audio_path: Path,
+    transcripts: list[Path],
+    diarizer: str,
+    num_speakers: Optional[int],
+    max_speakers: int,
+) -> int:
+    """Посчитать спикеров один раз и разложить их по нескольким транскриптам.
+
+    Интервалы спикеров не зависят от ASR, поэтому метки в разных транскриптах
+    одной записи после этого сопоставимы: расхождение можно показывать вместе
+    с тем, кто это сказал.
+    """
+    loaded = [(path, *load_segments(path)) for path in transcripts]
+    for path, segments, _ in loaded:
+        if not segments:
+            print(f"ERROR: в {path.name} нет сегментов", file=sys.stderr)
+            return 0
+
+    if diarizer == "pyannote":
+        spans = pyannote_spans(audio_path, num_speakers)
+    else:
+        # Основа для эмбеддингов — самый дробный транскрипт: интервалы выходят
+        # настолько точными, насколько позволяет лучшая из двух сегментаций.
+        basis_path, basis_segments, _ = max(loaded, key=lambda item: len(item[1]))
+        print(f"[diarize] основа для эмбеддингов: {basis_path.name} "
+              f"({len(basis_segments)} сегментов)", flush=True)
+        spans = resemblyzer_spans(audio_path, basis_segments, num_speakers, max_speakers)
+    if not spans:
+        print("ERROR: диаризация не дала ни одного интервала", file=sys.stderr)
+        return 0
+
+    speakers = 0
+    backfill = diarizer != "pyannote"
+    for path, segments, meta in loaded:
+        speakers = assign_speakers(segments, spans, backfill=backfill)
+        meta = {**meta, "diarizer": diarizer, "speakers_detected": speakers,
+                "diarization_scope": "shared"}
+        duration = float(meta.get("duration_seconds") or (segments[-1].end if segments else 0.0))
+        write_json(segments, duration, {k: v for k, v in meta.items()
+                                        if k != "duration_seconds"}, path)
+        stem = path.name[: -len(".json")] if path.name.endswith(".json") else path.stem
+        write_markdown(segments, meta, path.with_name(stem + ".md"))
+        write_srt(segments, path.with_name(stem + ".srt"))
+    return speakers
+
+
 # -------------- ОЦЕНКА И ВЫБОР --------------
 
 def build_estimate_report(duration: float, env: dict, diarizer: Optional[str]) -> dict:
     """JSON с длительностью и оценкой по всем пресетам и доступным бэкендам."""
-    # Order matters — first backend in this list is the auto-default if user
-    # doesn't pick. whisper.cpp is fastest on Apple Silicon (Metal) AND
-    # supports beam search, so it leads.
+    # Quality-capable beam-search backends lead; MLX is the last fallback.
     available_backends = []
     if env.get("whisper_cpp_bin"):
         available_backends.append("whisper-cpp")
-    if env["mlx_whisper"]:
-        available_backends.append("mlx-whisper")
     if env["faster_whisper"]:
         available_backends.append("faster-whisper")
+    if env["mlx_whisper"]:
+        available_backends.append("mlx-whisper")
 
     options = []
     for backend in available_backends:
-        for preset_name, cfg in PRESETS.items():
+        for preset_name in ("quality",):
+            cfg = PRESETS[preset_name]
             # Skip presets that require a model file we don't have (whisper.cpp).
             if backend == "whisper-cpp":
                 if not whisper_cpp_model_path(env.get("whisper_cpp_models_dir"), cfg["model"]):
@@ -1066,36 +1215,18 @@ def print_estimate_table(report: dict) -> None:
     print()
 
 
-def auto_default_backend(env: dict) -> str:
-    """The implicit default when --backend / --preset not given. whisper.cpp
-    on Apple Silicon is fastest AND supports beam search, so prefer it."""
-    if env.get("whisper_cpp_bin"):
+def auto_default_backend(env: dict, model: Optional[str] = None) -> Optional[str]:
+    """Pick the fastest installed backend that can run the requested model."""
+    wcpp_has_model = not model or whisper_cpp_model_path(
+        env.get("whisper_cpp_models_dir"), model
+    )
+    if env.get("whisper_cpp_bin") and wcpp_has_model:
         return "whisper-cpp"
+    if env["faster_whisper"]:
+        return "faster-whisper"
     if env["mlx_whisper"]:
         return "mlx-whisper"
-    return "faster-whisper"
-
-
-def interactive_select(report: dict) -> tuple[str, str]:
-    """Спрашивает пользователя выбор. Возвращает (backend, preset)."""
-    print_estimate_table(report)
-    while True:
-        try:
-            answer = input(f"Выбери вариант [1-{len(report['options'])}] (Enter = fast на самом быстром бэкенде): ").strip()
-        except EOFError:
-            answer = ""
-        if not answer:
-            # Default: fast preset on the fastest available backend (whisper.cpp > mlx > faster).
-            order = ["whisper-cpp", "mlx-whisper", "faster-whisper"]
-            preferred = next((b for b in order if b in report["available_backends"]),
-                             report["available_backends"][0])
-            return preferred, "fast"
-        if answer.isdigit():
-            idx = int(answer) - 1
-            if 0 <= idx < len(report["options"]):
-                opt = report["options"][idx]
-                return opt["backend"], opt["preset"]
-        print(f"Не понял. Введи число от 1 до {len(report['options'])} или Enter.")
+    return None
 
 
 # -------------- MAIN --------------
@@ -1107,16 +1238,10 @@ def main() -> int:
     )
     parser.add_argument("input", type=Path, help="Путь к видео или аудио.")
     parser.add_argument(
-        "--preset", choices=["quality", "balanced", "fast"], default=None,
-        help="Пресет качества/скорости. Если не задан — спрашивает (TTY) или balanced.",
-    )
-    parser.add_argument(
         "--backend", choices=["whisper-cpp", "mlx-whisper", "faster-whisper"], default=None,
         help="Бэкенд транскрипции. Если не задан — выбирается автоматически "
-             "(приоритет: whisper-cpp > mlx-whisper > faster-whisper).",
+             "(приоритет: whisper-cpp > faster-whisper > mlx-whisper).",
     )
-    parser.add_argument("--model", default=None, help="Переопределить модель из пресета.")
-    parser.add_argument("--beam-size", type=int, default=None, help="Переопределить beam_size из пресета.")
     parser.add_argument("--language", default="ru", help="Код языка ISO-639-1 или 'auto' (по умолчанию: ru).")
     parser.add_argument(
         "--compute-type", default="auto",
@@ -1141,13 +1266,27 @@ def main() -> int:
     )
     parser.add_argument("--keep-audio", action="store_true", help="Не удалять промежуточный WAV.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Куда складывать артефакты.")
+    parser.add_argument(
+        "--suffix",
+        default="",
+        help="Суффикс имени артефактов перед .transcript (например, .whisper).",
+    )
+    parser.add_argument(
+        "--diarize-only", action="store_true",
+        help="Не транскрибировать: посчитать спикеров один раз и разложить их "
+             "по готовым транскриптам из --apply-to.",
+    )
+    parser.add_argument(
+        "--apply-to", type=Path, nargs="+", default=None,
+        help="JSON-транскрипты одной и той же записи, которым проставить спикеров.",
+    )
     parser.add_argument("--estimate-only", action="store_true",
                         help="Только напечатать оценку времени (JSON) и выйти.")
     parser.add_argument("--analyze", action="store_true",
                         help="Preflight-анализ: длительность + аудио-свойства + статистика тишин + "
-                             "рекомендация пресета. Выводит JSON и выходит.")
+                             "оценка рисков и бэкенда. Выводит JSON и выходит.")
     parser.add_argument("--yes", "-y", action="store_true",
-                        help="Не спрашивать ничего интерактивно (берёт --preset или balanced).")
+                        help="Не спрашивать ничего интерактивно.")
     parser.add_argument("--json", action="store_true", help="С --estimate-only выводить чистый JSON.")
 
     args = parser.parse_args()
@@ -1164,9 +1303,49 @@ def main() -> int:
     check_ffmpeg()
     env = detect_environment()
 
-    if not (env["faster_whisper"] or env["mlx_whisper"] or env.get("whisper_cpp_bin")):
+    # Режим общей диаризации: Whisper-бэкенд здесь не нужен вовсе.
+    if args.diarize_only:
+        if not args.apply_to:
+            print("ERROR: --diarize-only требует --apply-to <transcript.json …>", file=sys.stderr)
+            return 1
+        missing = [str(path) for path in args.apply_to if not path.is_file()]
+        if missing:
+            print(f"ERROR: транскрипт не найден: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        diarizer = resolve_diarizer(args.diarizer, env)
+        if diarizer is None:
+            print("ERROR: --diarizer none несовместим с --diarize-only", file=sys.stderr)
+            return 1
+        with tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / f"{input_path.stem}.diarize.wav"
+            extract_audio(input_path, wav_path)
+            speakers = apply_shared_diarization(
+                wav_path,
+                [path.expanduser().resolve() for path in args.apply_to],
+                diarizer,
+                args.num_speakers,
+                args.max_speakers,
+            )
+        if not speakers:
+            return 2
+        print(f"\n✅ Спикеров: {speakers}; метки одинаковы во всех транскриптах.")
+        return 0
+
+    quality_model = PRESETS["quality"]["model"]
+    quality_wcpp = bool(
+        env.get("whisper_cpp_bin")
+        and whisper_cpp_model_path(env.get("whisper_cpp_models_dir"), quality_model)
+    )
+    if not (env["faster_whisper"] or env["mlx_whisper"] or quality_wcpp):
+        missing_model = ""
+        if env.get("whisper_cpp_bin"):
+            missing_model = (
+                "\n  whisper.cpp найден, но отсутствует models/ggml-large-v3.bin."
+                "\n  Скачай максимальную модель по инструкции references/setup.md."
+            )
         print(
-            "ERROR: ни один бэкенд whisper не установлен.\n"
+            "ERROR: ни один бэкенд не готов запустить обязательную Whisper large-v3."
+            f"{missing_model}\n"
             "  whisper.cpp (Metal на Apple Silicon, рекомендуется): см. references/setup.md\n"
             "  pip install mlx-whisper              # альтернатива на Apple Silicon\n"
             "  pip install faster-whisper           # кросс-платформенный CPU",
@@ -1201,23 +1380,26 @@ def main() -> int:
             print_estimate_table(report)
         return 0
 
-    # Определяем backend и preset
+    # Политика фиксирована: максимальная large-v3 и beam=5.
     backend = args.backend
-    preset_name = args.preset
-
-    # Интерактивный выбор: только если есть TTY и пользователь ничего не передал и не --yes
-    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
-    if not args.yes and preset_name is None and backend is None and is_tty:
-        report = build_estimate_report(duration, env, effective_diarizer)
-        backend, preset_name = interactive_select(report)
-    else:
-        if preset_name is None:
-            preset_name = "fast"  # bench: fast почти не отличается от balanced/quality на финальном отчёте
-        if backend is None:
-            backend = auto_default_backend(env)
+    preset_name = "quality"
+    if backend is None:
+        backend = auto_default_backend(env, PRESETS[preset_name]["model"])
+    if backend is None:
+        print("ERROR: нет бэкенда, способного запустить обязательную large-v3", file=sys.stderr)
+        return 1
 
     if backend == "whisper-cpp" and not env.get("whisper_cpp_bin"):
         print("ERROR: --backend whisper-cpp, но whisper-cli не найден. См. references/setup.md", file=sys.stderr)
+        return 1
+    if backend == "whisper-cpp" and not whisper_cpp_model_path(
+        env.get("whisper_cpp_models_dir"), quality_model
+    ):
+        print(
+            "ERROR: --backend whisper-cpp требует максимальную models/ggml-large-v3.bin. "
+            "Скачай её по инструкции references/setup.md",
+            file=sys.stderr,
+        )
         return 1
     if backend == "mlx-whisper" and not env["mlx_whisper"]:
         print("ERROR: --backend mlx-whisper, но пакет не установлен. pip install mlx-whisper", file=sys.stderr)
@@ -1227,14 +1409,18 @@ def main() -> int:
         return 1
 
     preset = PRESETS[preset_name]
-    model = args.model or preset["model"]
-    beam_size = args.beam_size if args.beam_size is not None else preset["beam_size"]
+    model = preset["model"]
+    beam_size = preset["beam_size"]
+    actual_beam_size = 1 if backend == "mlx-whisper" and beam_size > 1 else beam_size
 
     # Финальная сводка перед запуском
     final_estimate = estimate_seconds(duration, backend, preset_name, effective_diarizer)
     print()
     print(f"📂 {input_path.name}  ({fmt_ts(duration)})")
-    print(f"⚙️  preset={preset_name}  backend={backend}  model={model}  beam={beam_size}")
+    print(
+        f"⚙️  backend={backend}  model={model}  beam={actual_beam_size} "
+        "(фиксированный максимум)"
+    )
     if effective_diarizer:
         print(f"🎭 diarize={effective_diarizer}")
     print(f"⏱  ожидаемое время: {fmt_estimate(final_estimate)}")
@@ -1242,7 +1428,7 @@ def main() -> int:
 
     out_dir = (args.output_dir or input_path.parent).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = input_path.stem
+    stem = input_path.stem + args.suffix
     json_path = out_dir / f"{stem}.transcript.json"
     md_path = out_dir / f"{stem}.transcript.md"
     srt_path = out_dir / f"{stem}.transcript.srt"
@@ -1297,7 +1483,7 @@ def main() -> int:
         "preset": preset_name,
         "backend": backend,
         "model": model,
-        "beam_size": beam_size,
+        "beam_size": actual_beam_size,
         "language": args.language,
         "diarizer": effective_diarizer,
         "speakers_detected": speakers_detected,
