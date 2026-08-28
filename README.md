@@ -37,8 +37,12 @@
 1. Если папки ~/.claude/skills/meeting-transcribe ещё нет — клонируй туда репу.
 2. Проверь ffmpeg (which ffmpeg). Нет — поставь (Mac: brew install ffmpeg,
    Linux: подскажи команду под дистрибутив).
-3. Создай venv ~/.venvs/whisper и активируй. Используй ~/.venvs/whisper/bin/pip
-   для всех установок (НЕ системный pip). Пропиши в ~/.zshrc
+3. Создай venv ~/.venvs/whisper. Если в PATH есть uv — `uv venv ~/.venvs/whisper`
+   и ставь пакеты через `uv pip install --python ~/.venvs/whisper/bin/python …`;
+   иначе `python3 -m venv` и `~/.venvs/whisper/bin/python -m pip install …`.
+   Учти: в venv, созданном uv, нет `pip`, поэтому команды вида
+   `~/.venvs/whisper/bin/pip install` там не работают. Системный pip не
+   использовать. Пропиши в ~/.zshrc
    export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python — иначе скрипты,
    запущенные системным python3, не увидят пакеты этого venv.
 4. Определи платформу (uname -sm) и **поставь рекомендуемый скиллом
@@ -56,7 +60,7 @@
    `quality`, beam=5. Не спрашивай пользователя о размере или модели Whisper.
 
    Сборка whisper.cpp:
-       ~/.venvs/whisper/bin/pip install -r ~/.claude/skills/meeting-transcribe/scripts/requirements.txt
+       # пакеты скилла — тем же способом, что выбран в шаге 3
        brew install cmake  # если ещё нет
        git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
        cd ~/whisper.cpp
@@ -75,11 +79,9 @@
    Не предлагай другую Whisper-модель или пониженный пресет даже ради
    скорости или экономии места.
 
-5. Поставь GigaAM в отдельный venv:
-       python3 -m venv ~/.venvs/asr
-       ~/.venvs/asr/bin/pip install --upgrade pip
-       ~/.venvs/asr/bin/pip install \
-         "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" \
+5. Поставь GigaAM в отдельный venv ~/.venvs/asr (uv или python -m venv, как в
+   шаге 3) и в него:
+         "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git"
          silero-vad
 
 6. Спроси, нужна ли диаризация (метки спикеров — кто что сказал). Цена:
@@ -96,8 +98,8 @@
      Q&A постфактум («что Илья сказал про дедлайн?»), или нужна юр. точность
      цитат. Иначе Claude атрибутирует реплики по контексту сам.
 
-   Если да — `~/.venvs/whisper/bin/pip install pyannote.audio` (точнее) или
-   `~/.venvs/whisper/bin/pip install resemblyzer scikit-learn` (без токенов).
+   Если да — поставь в ~/.venvs/whisper либо `pyannote.audio` (точнее), либо
+   `resemblyzer scikit-learn` (без токенов).
    Для pyannote расскажи как получить бесплатный HF_TOKEN
    (references/setup.md).
 
@@ -144,17 +146,29 @@ git clone https://github.com/gman-dev-nov/meeting-transcribe-skill.git ~/.claude
 ### Шаг 2. Базовые зависимости
 
 ```bash
-# ffmpeg
 brew install ffmpeg
-
-# Python venv скилла
-python3 -m venv ~/.venvs/whisper
-source ~/.venvs/whisper/bin/activate
-pip install --upgrade pip
 ```
 
-Всё, что ставится через pip ниже, идёт в этот venv. Чтобы скрипты нашли эти
-пакеты при запуске из-под другого интерпретатора, один раз пропиши:
+Дальше нужен venv скилла. Если у тебя есть [uv](https://docs.astral.sh/uv/) —
+бери его, он быстрее и сам поставит нужный Python:
+
+```bash
+uv venv ~/.venvs/whisper
+```
+
+Без uv — штатным модулем:
+
+```bash
+python3 -m venv ~/.venvs/whisper
+~/.venvs/whisper/bin/python -m pip install --upgrade pip
+```
+
+> **venv от uv не содержит `pip`.** Это не поломка, а его штатное поведение:
+> ставить в такой venv нужно `uv pip install --python ~/.venvs/whisper/bin/python …`.
+> Команды ниже даны в обоих вариантах.
+
+Чтобы скрипты нашли пакеты этого venv при запуске из-под другого
+интерпретатора, один раз пропиши:
 
 ```bash
 echo 'export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python' >> ~/.zshrc
@@ -184,10 +198,21 @@ pip install faster-whisper
 
 ### Шаг 4. Установить GigaAM
 
+С uv:
+
+```bash
+uv venv ~/.venvs/asr
+uv pip install --python ~/.venvs/asr/bin/python \
+  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" \
+  silero-vad
+```
+
+Без uv:
+
 ```bash
 python3 -m venv ~/.venvs/asr
-~/.venvs/asr/bin/pip install --upgrade pip
-~/.venvs/asr/bin/pip install \
+~/.venvs/asr/bin/python -m pip install --upgrade pip
+~/.venvs/asr/bin/python -m pip install \
   "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" \
   silero-vad
 ```
@@ -199,11 +224,13 @@ Whisper-бэкендом. Нестандартный путь передаётс
 
 ```bash
 # Локальная, без токенов (на 2–5 спикерах достаточно)
-~/.venvs/whisper/bin/pip install resemblyzer scikit-learn
+uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn
 
 # Или точнее, но нужен бесплатный HF_TOKEN
-~/.venvs/whisper/bin/pip install pyannote.audio
+uv pip install --python ~/.venvs/whisper/bin/python pyannote.audio
 ```
+
+Без uv — тем же venv: `~/.venvs/whisper/bin/python -m pip install …`.
 
 Получение `HF_TOKEN`: см. `references/setup.md` → раздел «HF_TOKEN для pyannote».
 

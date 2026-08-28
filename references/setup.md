@@ -21,16 +21,34 @@ cmake --build build --config Release -j 8
 bash models/download-ggml-model.sh large-v3         # ~3 ГБ; quality, beam=5
 
 # 4. Локальная диаризация (опционально — нужна только если будешь использовать --diarize)
-python3 -m venv ~/.venvs/whisper
-source ~/.venvs/whisper/bin/activate
-pip install --upgrade pip
-pip install resemblyzer scikit-learn
+uv venv ~/.venvs/whisper                 # или: python3 -m venv ~/.venvs/whisper
+uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn
 ```
 
 Скилл найдёт whisper.cpp автоматически по путям: `$WHISPER_CPP_HOME`, `~/whisper.cpp/`, `~/.local/share/whisper.cpp/`, или через `whisper-cli` в `$PATH`. Если нестандартное место — выстави `export WHISPER_CPP_HOME=/path/to/whisper.cpp`.
 
 Проверка: `python3 scripts/setup_check.py` — wizard покажет, всё ли на месте,
 и явно напечатает, какими интерпретаторами будут запущены Whisper и GigaAM.
+
+### venv: чем ставить и где держать
+
+Ставить можно чем угодно — важен только путь к интерпретатору. Практическая
+разница одна:
+
+| Способ | Как ставить пакеты | Есть ли `pip` внутри |
+|---|---|---|
+| `uv venv ~/.venvs/<name>` | `uv pip install --python ~/.venvs/<name>/bin/python …` | **нет** |
+| `python3 -m venv ~/.venvs/<name>` | `~/.venvs/<name>/bin/python -m pip install …` | да |
+
+uv быстрее и сам подтягивает нужную версию Python, поэтому в инструкциях он
+первым. Но **в его venv нет `pip`**, и команды вида `~/.venvs/asr/bin/pip
+install` там молча не существуют — это самая частая причина «инструкция не
+работает».
+
+Каталог `~/.venvs/<name>` выбран потому, что venv-ов у скилла два и они
+именованные; `.venv` в единственном числе принято класть рядом с проектом, а не
+в домашнюю папку. Путь ни на что не завязан: обе переменные ниже перекрывают
+дефолт, так что держать окружения можно где угодно.
 
 ### Каким Python запускаются скрипты
 
@@ -68,11 +86,13 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 Официальный пакет Сбера. **PyPI-пакет `gigaam` отстаёт от GitHub** (в нём нет v3-чекпоинтов) — ставить только с GitHub:
 
 ```bash
-python3 -m venv ~/.venvs/asr && source ~/.venvs/asr/bin/activate
-pip install --upgrade pip
-pip install "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git"
-pip install silero-vad
+uv venv ~/.venvs/asr
+uv pip install --python ~/.venvs/asr/bin/python \
+  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" silero-vad
 ```
+
+Без uv: `python3 -m venv ~/.venvs/asr`, затем
+`~/.venvs/asr/bin/python -m pip install …` с теми же пакетами.
 
 Низкоуровневый запуск из этого venv: `~/.venvs/asr/bin/python3 scripts/gigaam_longform.py "запись.m4a" --device mps`. `--device cuda` и `--device cpu` — явные низкоуровневые оверрайды; штатный `dual_transcribe.py` выбирает устройство сам. Чекпоинт `v3_e2e_rnnt` (~0.4 ГБ) скачается при первом запуске.
 

@@ -19,6 +19,19 @@ pip install pyannote.audio
 
 Лучший способ диагностики — `python3 scripts/setup_check.py`. Wizard покажет, чего не хватает.
 
+## `~/.venvs/<name>/bin/pip: no such file` или `No module named pip`
+
+venv создан через `uv` — в таких окружениях `pip` не устанавливается. Это не
+поломка. Ставить в него нужно так:
+
+```bash
+uv pip install --python ~/.venvs/asr/bin/python <пакеты>
+```
+
+Если uv под рукой нет, а pip внутри нужен: `~/.venvs/asr/bin/python -m ensurepip
+--upgrade`. Проверить происхождение venv: `cat ~/.venvs/asr/pyvenv.cfg` —
+строка `uv = …` означает, что окружение создано uv.
+
 ## «Ни один бэкенд не готов», хотя faster-whisper установлен
 
 Пакет стоит в venv, а скрипт запущен другим интерпретатором — импорта не
