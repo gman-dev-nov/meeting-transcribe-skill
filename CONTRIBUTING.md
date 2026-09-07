@@ -7,15 +7,29 @@ PR'ы приветствуются — особенно тесты на корн
 ## Локальная разработка
 
 1. Клонируй и поставь зависимости по разделу [Установка](README.md#установка)
-   из README. По умолчанию: `whisper.cpp` + `resemblyzer` на Apple Silicon,
-   `faster-whisper` + `resemblyzer` на Linux/Windows.
-2. Проверь окружение: `python3 scripts/setup_check.py` — wizard покажет, что
+   из README. По умолчанию: `whisper.cpp` на Apple Silicon,
+   `faster-whisper` на Linux/Windows/Intel Mac и GigaAM в отдельном venv для
+   русского двойного прохода. Диаризация устанавливается опционально.
+2. Из корня клона проверь окружение: `python3 scripts/setup_check.py` — wizard покажет, что
    установлено, чего не хватает и какими интерпретаторами будут запущены
    Whisper и GigaAM (см. `WHISPER_PYTHON` / `GIGAAM_PYTHON` в
    `references/setup.md`).
-3. Для разработки клонируй репо в произвольную папку, а не в `~/.claude/skills/`.
-   На время работы можно сделать симлинк: `ln -s ~/path/to/clone
-   ~/.claude/skills/meeting-transcribe` — Claude Code подхватит.
+3. Для разработки держи клон в произвольной рабочей папке и подключи его
+   симлинком. Из корня клона для Codex (приложение и CLI):
+
+   ```bash
+   mkdir -p "$HOME/.agents/skills"
+   ln -s "$PWD" "$HOME/.agents/skills/meeting-transcribe"
+   ```
+
+   Для Claude Code вместо `~/.agents/skills` используй `~/.claude/skills`.
+   Если по целевому пути уже есть скилл, сначала проверь его содержимое и
+   сохрани локальные изменения. Открой новую сессию агента; если Codex не
+   обнаружил скилл, перезапусти его.
+
+   Команды `scripts/...` в этом документе запускаются из корня клона. При
+   проверке установленного скилла из другой рабочей папки используй
+   абсолютные пути из [README](README.md#использование-в-агенте).
 
 ## Тесты
 
@@ -28,6 +42,21 @@ python3 -m unittest discover -s tests -v
 нормализация. Гонять их нужно и системным `python3` (на macOS это 3.9), и
 свежим — в CI матрица 3.9/3.13. Транскрипцию на реальной записи проверяй
 руками: `python3 scripts/dual_transcribe.py run "<файл>"`.
+
+Для проверки интеграции Codex открой задачу в другой папке, явно вызови
+`$meeting-transcribe` с абсолютным путём к тестовой записи и проверь полный
+цикл: preflight, два независимых ASR-прохода, LLM-review по контракту,
+рендеринг расхождений и отчёт после разрешения критических расхождений.
+Используй отдельную папку для тестовых артефактов. Смысловую сверку выполняет
+активная модель Codex, включая Astra при её доступности; модель в скилле
+не фиксируется. ASR-модель остаётся `large-v3` / `quality` / beam=5.
+
+`agents/openai.yaml` использует схему Codex: `interface` для метаданных UI
+и `policy.allow_implicit_invocation` для автоматического выбора скилла.
+`dependencies.tools` предназначен для MCP-сервисов; Python-пакеты, ffmpeg
+и ASR-модели описываются в инструкции установки и проверяются
+`setup_check.py`. Схема и пути установки:
+[официальная документация Codex](https://learn.chatgpt.com/docs/build-skills).
 
 ## Что мы ценим в PR
 
@@ -79,7 +108,7 @@ python3 -m unittest discover -s tests -v
    ```bash
    git tag -a v1.2.3 -m "1.2.3"
    git push origin v1.2.3
-   gh release create v1.2.3 --title "1.2.3" --notes-file <секция CHANGELOG>
+   gh release create v1.2.3 --title "1.2.3" --notes-file /path/to/release-notes.md
    ```
 
 **Буллеты в теле релиза пишутся одной строкой каждый**, даже если в CHANGELOG

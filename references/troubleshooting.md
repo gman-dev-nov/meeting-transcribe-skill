@@ -48,6 +48,13 @@ export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python
 Разово можно передать флагом: `dual_transcribe.py run … --whisper-python …`.
 GigaAM живёт в своём venv и настраивается переменной `GIGAAM_PYTHON`.
 
+Прямой вызов `transcribe.py`, включая `--analyze` и `--diarize-only`, не
+перезапускает себя в этом venv. Его нужно запускать выбранным интерпретатором:
+
+```bash
+"$WHISPER_PYTHON" scripts/transcribe.py "/абсолютный/путь/запись.m4a" --analyze
+```
+
 ## Один из двух ASR-процессов упал
 
 `dual_transcribe.py` останавливает второй процесс и не публикует частично

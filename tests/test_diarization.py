@@ -49,6 +49,12 @@ class AssignSpeakersTests(unittest.TestCase):
 
         self.assertIsNone(segments[1].speaker)
 
+    def test_new_assignment_clears_an_obsolete_speaker_label(self):
+        segments = [Segment(10, 12, "нет речи", speaker="SPEAKER_99")]
+        speakers = transcribe.assign_speakers(segments, [(0.0, 2.0, "A")])
+        self.assertEqual(speakers, 0)
+        self.assertIsNone(segments[0].speaker)
+
     def test_backfill_takes_the_label_of_the_nearest_neighbour(self):
         segments = [Segment(0, 2, "речь"), Segment(10, 10.4, "короткий")]
 
@@ -71,6 +77,59 @@ class SpansFromSegmentsTests(unittest.TestCase):
         spans = transcribe.spans_from_labelled_segments(segments, [0, 2], [1, 1])
 
         self.assertEqual(spans, [(0, 6, "1")])
+
+
+class ResemblyzerTimelineTests(unittest.TestCase):
+    def dependencies(self, waveform):
+        """Лёгкие заглушки моделей с реальным эффектом удаления тишины."""
+        encoder = mock.Mock()
+        encoder.embed_utterance.side_effect = lambda chunk: [chunk[0]]
+
+        def trim_silence(audio, source_sr=None):
+            # Поддержка пути воспроизводит старое поведение: из полной записи
+            # исчезали паузы, после чего ASR-срезы попадали в чужую речь.
+            samples = waveform if isinstance(audio, (str, Path)) else audio
+            return [sample for sample in samples if sample != 0]
+
+        modules = {
+            "librosa": mock.Mock(),
+            "numpy": mock.Mock(),
+            "resemblyzer": mock.Mock(),
+            "sklearn": mock.Mock(),
+            "sklearn.cluster": mock.Mock(),
+            "sklearn.metrics": mock.Mock(),
+        }
+        modules["librosa"].load.return_value = (waveform, 16000)
+        modules["resemblyzer"].VoiceEncoder.return_value = encoder
+        modules["resemblyzer"].preprocess_wav.side_effect = trim_silence
+        modules["numpy"].vstack.side_effect = lambda embeddings: embeddings
+        modules["sklearn.cluster"].AgglomerativeClustering.return_value.fit_predict.side_effect = (
+            lambda embeddings: [int(embedding[0]) - 1 for embedding in embeddings]
+        )
+        return modules, encoder
+
+    def test_silence_removal_does_not_shift_asr_timestamp_slices(self):
+        sr = 16000
+        waveform = [0] * (2 * sr) + [1] * sr + [0] * (2 * sr) + [2] * sr
+        segments = [Segment(1, 3, "первая реплика"), Segment(4, 6, "вторая реплика")]
+        modules, encoder = self.dependencies(waveform)
+
+        with mock.patch.dict(sys.modules, modules):
+            spans = transcribe.resemblyzer_spans(Path("meeting.wav"), segments, 2)
+
+        self.assertEqual(spans, [(1, 3, "0"), (4, 6, "1")])
+        chunks = [call.args[0] for call in encoder.embed_utterance.call_args_list]
+        self.assertEqual(chunks, [[1] * sr, [2] * sr])
+        modules["librosa"].load.assert_called_once_with("meeting.wav", sr=16000, mono=True)
+
+    def test_segment_with_no_speech_after_preprocessing_is_skipped(self):
+        modules, encoder = self.dependencies([0] * 32000)
+        with mock.patch.dict(sys.modules, modules):
+            spans = transcribe.resemblyzer_spans(
+                Path("silence.wav"), [Segment(0, 2, "ложное распознавание")], 1
+            )
+        self.assertEqual(spans, [])
+        encoder.embed_utterance.assert_not_called()
 
 
 class SharedDiarizationTests(unittest.TestCase):
@@ -133,6 +192,26 @@ class SharedDiarizationTests(unittest.TestCase):
             self.assertEqual(metadata["diarization_scope"], "shared")
             self.assertEqual(metadata["diarizer"], "pyannote")
             self.assertEqual(metadata["speakers_detected"], 1)
+
+    def test_coarse_transcript_omitting_first_speaker_keeps_shared_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            coarse = self.artifact(root, "m.gigaam.transcript.json", [(0, 6)],
+                                   engine="gigaam")
+            fine = self.artifact(root, "m.whisper.transcript.json", [(0, 1), (1, 6)])
+            spans = [(0.0, 1.0, "A"), (1.0, 6.0, "B")]
+            with mock.patch.object(transcribe, "pyannote_spans", return_value=spans):
+                transcribe.apply_shared_diarization(
+                    root / "audio.wav", [coarse, fine], "pyannote", None, 6
+                )
+            coarse_data = json.loads(coarse.read_text(encoding="utf-8"))
+            fine_data = json.loads(fine.read_text(encoding="utf-8"))
+        self.assertEqual([segment["speaker"] for segment in coarse_data["segments"]],
+                         ["SPEAKER_01"])
+        self.assertEqual([segment["speaker"] for segment in fine_data["segments"]],
+                         ["SPEAKER_00", "SPEAKER_01"])
+        self.assertEqual(coarse_data["metadata"]["speakers_detected"], 1)
+        self.assertEqual(fine_data["metadata"]["speakers_detected"], 2)
 
     def test_markdown_and_srt_are_rewritten_with_speakers(self):
         with tempfile.TemporaryDirectory() as temporary:

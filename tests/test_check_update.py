@@ -375,6 +375,70 @@ class InstallKindTests(unittest.TestCase):
             kind, _ = check_update.detect_install(plugin_dir, {})
         self.assertEqual(kind, "plugin")
 
+    def test_codex_plugin_cache_overrides_git_install(self):
+        with TempInstall() as install:
+            plugin_dir = install.home / ".codex" / "plugins" / "cache" / "mt" / "1.0.0"
+            (plugin_dir / ".git").mkdir(parents=True)
+            kind, _ = check_update.detect_install(plugin_dir, install.env)
+        self.assertEqual(kind, "plugin")
+
+    def test_custom_codex_home_plugin_cache(self):
+        with TempInstall() as install:
+            codex_home = install.home / "custom-codex"
+            plugin_dir = codex_home / "plugins" / "cache" / "mt"
+            (plugin_dir / ".git").mkdir(parents=True)
+            kind, _ = check_update.detect_install(
+                plugin_dir, dict(install.env, CODEX_HOME=str(codex_home))
+            )
+        self.assertEqual(kind, "plugin")
+
+    def test_symlinked_codex_storage_detected_from_both_paths(self):
+        for custom_home in (False, True):
+            with self.subTest(custom_home=custom_home), TempInstall() as install:
+                codex_home = install.home / ("custom-codex" if custom_home else ".codex")
+                codex_home.mkdir()
+                storage = install.home / "storage"
+                plugin_dir = storage / "cache" / "mt"
+                (plugin_dir / ".git").mkdir(parents=True)
+                (codex_home / "plugins").symlink_to(storage, target_is_directory=True)
+                env = dict(install.env)
+                if custom_home:
+                    env["CODEX_HOME"] = str(codex_home)
+                for path in (plugin_dir, codex_home / "plugins" / "cache" / "mt"):
+                    kind, _ = check_update.detect_install(path, env)
+                    self.assertEqual(kind, "plugin", str(path))
+
+    def test_direct_skill_symlinks_to_git_remain_updateable(self):
+        for directory in (".agents", ".codex", ".claude"):
+            with self.subTest(directory=directory), TempInstall() as install:
+                (install.skill_dir / ".git").mkdir()
+                skill_root = install.home / directory / "skills"
+                skill_root.mkdir(parents=True)
+                link = skill_root / "meeting-transcribe"
+                link.symlink_to(install.skill_dir, target_is_directory=True)
+                kind, _ = check_update.detect_install(link, install.env)
+                self.assertEqual(kind, "git")
+
+    def test_codex_home_sibling_of_plugins_is_not_managed(self):
+        with TempInstall() as install:
+            codex_home = install.home / "custom-codex"
+            skill = codex_home / "plugins-local" / "mt"
+            (skill / ".git").mkdir(parents=True)
+            kind, _ = check_update.detect_install(
+                skill, dict(install.env, CODEX_HOME=str(codex_home))
+            )
+        self.assertEqual(kind, "git")
+
+    def test_broken_codex_plugin_storage_does_not_break_direct_install(self):
+        with TempInstall() as install:
+            codex_home = install.home / ".codex"
+            codex_home.mkdir()
+            storage = codex_home / "plugins"
+            storage.symlink_to(storage, target_is_directory=True)
+            (install.skill_dir / ".git").mkdir()
+            kind, _ = check_update.detect_install(install.skill_dir, install.env)
+        self.assertEqual(kind, "git")
+
     def test_plugin_install_is_not_offered_a_git_pull(self):
         with TempInstall() as install:
             plugin_dir = install.home / ".claude" / "plugins" / "marketplaces" / "mt"
@@ -383,8 +447,9 @@ class InstallKindTests(unittest.TestCase):
             notice = check_update.check(
                 env=install.env, skill_dir=plugin_dir, fetch=lambda: RELEASE
             )
-        self.assertIn("/plugin", notice)
+        self.assertIn("управление плагинами", notice)
         self.assertNotIn("--update", notice)
+        self.assertNotIn("Claude Code", notice)
 
 
 class UpdateTests(unittest.TestCase):
@@ -400,7 +465,23 @@ class UpdateTests(unittest.TestCase):
                 install.skill_dir, {"CLAUDE_PLUGIN_ROOT": str(install.skill_dir)}
             )
         self.assertEqual(code, 1)
-        self.assertIn("/plugin", message)
+        self.assertIn("управление плагинами", message)
+
+    def test_refuses_codex_managed_clone_before_any_git_call(self):
+        for custom_home in (False, True):
+            with self.subTest(custom_home=custom_home), TempInstall() as install:
+                codex_home = install.home / ("custom-codex" if custom_home else ".codex")
+                plugin_dir = codex_home / "plugins" / "cache" / "mt"
+                (plugin_dir / ".git").mkdir(parents=True)
+                env = dict(install.env)
+                if custom_home:
+                    env["CODEX_HOME"] = str(codex_home)
+                with mock.patch.object(check_update, "git") as git:
+                    code, message = check_update.run_update(plugin_dir, env)
+                git.assert_not_called()
+                self.assertEqual(code, 1)
+                self.assertIn("управление плагинами", message)
+                self.assertNotIn("Claude Code", message)
 
     def test_refuses_dirty_worktree(self):
         with TempInstall() as install:
@@ -423,7 +504,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("detached HEAD", message)
 
-    def test_successful_fast_forward_reports_new_version(self):
+    def test_successful_fast_forward_through_direct_skill_symlink(self):
         # Единственный сценарий, где действительно выполняется git pull:
         # проверяем его на настоящем клоне, вместе с флагами обёртки.
         with TempInstall() as install:
@@ -434,12 +515,16 @@ class UpdateTests(unittest.TestCase):
 
             clone = Path(install.home) / "clone"
             self._git(["clone", "-q", str(upstream), str(clone)])
+            skill_root = install.home / ".agents" / "skills"
+            skill_root.mkdir(parents=True)
+            link = skill_root / "meeting-transcribe"
+            link.symlink_to(clone, target_is_directory=True)
 
             (upstream / "VERSION").write_text("0.2.0\n", encoding="utf-8")
             self._git(["-C", str(upstream), "add", "-A"])
             self._git(["-C", str(upstream), "commit", "-qm", "release"])
 
-            code, message = check_update.run_update(clone, {})
+            code, message = check_update.run_update(link, install.env)
 
         self.assertEqual(code, 0, message)
         self.assertIn("0.2.0", message)
@@ -506,6 +591,29 @@ class GitWrapperTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_status_keeps_managed_plugin_symlink_location(self):
+        # SKILL_DIR не должен терять путь запуска до проверки установки:
+        # разрешение __file__ заранее превращало бы плагин в обычный git-клон.
+        with TempInstall() as install:
+            scripts = install.skill_dir / "scripts"
+            scripts.mkdir()
+            (scripts / "check_update.py").write_text(
+                SCRIPT.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            (install.skill_dir / ".git").mkdir()
+            plugin_root = install.home / ".codex" / "plugins" / "cache"
+            plugin_root.mkdir(parents=True)
+            link = plugin_root / "mt"
+            link.symlink_to(install.skill_dir, target_is_directory=True)
+            result = subprocess.run(
+                [sys.executable, str(link / "scripts" / "check_update.py"), "--status"],
+                env=dict(os.environ, **install.env),
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["install_kind"], "plugin")
+
     def test_status_is_valid_json_and_makes_no_request(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--status"],

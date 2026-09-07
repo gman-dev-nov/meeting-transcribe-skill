@@ -1,8 +1,10 @@
 # meeting-transcribe
 
-Скилл для Claude Code: локальная расшифровка созвонов и встреч + автоматический отчёт с TL;DR, решениями, action items и цитатами. ASR работает локально на Mac (Apple Silicon), Linux и Windows. Для русской речи два независимых движка сверяются через активный LLM, а спорные места подтверждает человек.
+Скилл для Claude Code и OpenAI Codex (приложение и CLI): локальная расшифровка созвонов и встреч + автоматический отчёт с TL;DR, решениями, action items и цитатами. ASR работает локально на Mac (Apple Silicon), Linux и Windows. Для русской речи два независимых движка сверяются через активную LLM, а спорные места подтверждает человек.
 
-> Скилл универсальный — `SKILL.md` имеет общий формат, который оба CLI читают одинаково. Различается только путь установки: `~/.claude/skills/` для Claude Code и `~/.agents/skills/` для Codex.
+Скилл использует `SKILL.md`; каталог установки — `~/.claude/skills/` для Claude Code или `~/.agents/skills/` для Codex. В Codex смысловую сверку и отчёт выполняет модель текущей сессии, в том числе Astra, если она доступна в этой сессии. Отдельный OpenAI API-ключ и фиксированная модель Codex не нужны. Политика Whisper `large-v3` относится к локальному ASR, а не к модели ассистента.
+
+Нужна локальная среда с доступом к записи, Python и терминалу. Обычный веб-чат ChatGPT сам по себе не получает доступ к `Downloads`, `Documents` и установленным на компьютере ASR-моделям.
 
 ## Как пользоваться
 
@@ -29,16 +31,20 @@
 | язык не русский | «это на английском» / «`--language en`» |
 | знаю точное число участников (улучшит диаризацию) | «нас было 4 человека» |
 
-## Ленивая установка через Claude Code
+## Установка через агента
 
-Если не хочется ставить руками — открой Claude Code в любой папке и скопипасти этот промпт. Агент сам всё проверит, поставит и спросит только то, что важно.
-
-> Для **OpenAI Codex CLI** используй тот же промпт, заменив `~/.claude/skills/` на `~/.agents/skills/`. Остальное (venv, бэкенды, диаризация, setup_check) — без изменений.
+Открой локальную задачу в приложении Codex, Codex CLI или Claude Code и скопипасти этот промпт. Агент проверит окружение и установит зависимости.
 
 ```text
 Поставь скилл meeting-transcribe (https://github.com/gman-dev-nov/meeting-transcribe-skill).
 
-1. Если папки ~/.claude/skills/meeting-transcribe ещё нет — клонируй туда репу.
+1. Выбери каталог для текущего агента: Codex (приложение или CLI) —
+   ~/.agents/skills/meeting-transcribe, Claude Code —
+   ~/.claude/skills/meeting-transcribe. Если каталога ещё нет — создай
+   родительский каталог и клонируй туда репу. Если он уже есть — сначала
+   проверь его содержимое, сохрани существующие локальные изменения.
+   Запомни абсолютный путь к скиллу; все scripts/, references/ и assets/
+   ниже относятся к этому каталогу, а не к рабочей папке текущей задачи.
 2. Проверь ffmpeg (which ffmpeg). Нет — поставь (Mac: brew install ffmpeg,
    Linux: подскажи команду под дистрибутив).
 3. Создай venv ~/.venvs/whisper. Если в PATH есть uv — `uv venv ~/.venvs/whisper`
@@ -46,9 +52,10 @@
    иначе `python3 -m venv` и `~/.venvs/whisper/bin/python -m pip install …`.
    Учти: в venv, созданном uv, нет `pip`, поэтому команды вида
    `~/.venvs/whisper/bin/pip install` там не работают. Системный pip не
-   использовать. Пропиши в ~/.zshrc
-   export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python — иначе скрипты,
-   запущенные системным python3, не увидят пакеты этого venv.
+   использовать. Стандартный ~/.venvs/whisper оркестратор dual_transcribe.py
+   и wizard setup_check.py находят автоматически;
+   для другого пути задай WHISPER_PYTHON с абсолютным путём к интерпретатору
+   и объясни, как сохранить его в настройках используемой оболочки.
 4. Определи платформу (uname -sm) и **поставь рекомендуемый скиллом
    бэкенд по умолчанию, без выбора**:
 
@@ -100,16 +107,17 @@
      На 6+ спикерах или громких звонках начинает путать.
    - **Когда стоит включать:** если запись длиннее 2ч и спикеров 6+, или нужен
      Q&A постфактум («что Илья сказал про дедлайн?»), или нужна юр. точность
-     цитат. Иначе агент атрибутирует реплики по контексту сам.
+     цитат. Без диаризации не приписывай реплики людям по догадке.
 
    Если да — поставь в ~/.venvs/whisper либо `pyannote.audio` (точнее), либо
    `resemblyzer scikit-learn` (без токенов).
    Для pyannote расскажи как получить бесплатный HF_TOKEN
    (references/setup.md).
 
-7. Запусти `python3 ~/.claude/skills/meeting-transcribe/scripts/setup_check.py`
-   и покажи результат. После этого скилл активен в следующей же сессии Claude
-   Code (загружается из `~/.claude/skills/meeting-transcribe/SKILL.md`).
+7. Запусти setup_check.py по абсолютному пути из scripts/ установленного
+   скилла и покажи результат. Открой новую сессию агента и проверь, что
+   meeting-transcribe доступен; в Codex его можно явно вызвать как
+   $meeting-transcribe. Если Codex не подхватил новый скилл, перезапусти его.
 ```
 
 После этого скилл готов: брось любой `.mp4`/`.m4a` агенту со словами «транскрибируй» — он сам всё сделает.
@@ -144,12 +152,34 @@
 
 ### Шаг 1. Клонировать сам скилл
 
+Для **Codex (приложение или CLI)**:
+
 ```bash
-mkdir -p ~/.claude/skills
-git clone https://github.com/gman-dev-nov/meeting-transcribe-skill.git ~/.claude/skills/meeting-transcribe
+mkdir -p "$HOME/.agents/skills"
+git clone https://github.com/gman-dev-nov/meeting-transcribe-skill.git "$HOME/.agents/skills/meeting-transcribe"
+export MEETING_TRANSCRIBE_SKILL_DIR="$HOME/.agents/skills/meeting-transcribe"
 ```
 
+Для **Claude Code**:
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+git clone https://github.com/gman-dev-nov/meeting-transcribe-skill.git "$HOME/.claude/skills/meeting-transcribe"
+export MEETING_TRANSCRIBE_SKILL_DIR="$HOME/.claude/skills/meeting-transcribe"
+```
+
+Команды ниже используют `MEETING_TRANSCRIBE_SKILL_DIR` и работают из любой
+папки. В новом терминале повтори соответствующий `export`. Если скилл уже
+клонирован для разработки, можно подключить его симлинком вместо второй
+копии — см. [CONTRIBUTING.md](CONTRIBUTING.md#локальная-разработка).
+Codex поддерживает пользовательские скиллы и симлинки в `~/.agents/skills/`:
+[официальная документация](https://learn.chatgpt.com/docs/build-skills).
+
 ### Шаг 2. Базовые зависимости
+
+Команды ниже — для macOS/Linux с bash или zsh. На Windows используй PowerShell
+и интерпретаторы `~/.venvs/<имя>/Scripts/python.exe` вместо `bin/python`.
+`ffmpeg` должен быть доступен в PATH. На macOS:
 
 ```bash
 brew install ffmpeg
@@ -173,31 +203,36 @@ python3 -m venv ~/.venvs/whisper
 > ставить в такой venv нужно `uv pip install --python ~/.venvs/whisper/bin/python …`.
 > Команды ниже даны в обоих вариантах.
 
-Чтобы скрипты нашли пакеты этого venv при запуске из-под другого
-интерпретатора, один раз пропиши:
+Стандартный `~/.venvs/whisper` оркестратор `dual_transcribe.py` и wizard
+`setup_check.py` находят автоматически. Для явного
+выбора интерпретатора в текущем терминале:
 
 ```bash
-echo 'export WHISPER_PYTHON=$HOME/.venvs/whisper/bin/python' >> ~/.zshrc
+export WHISPER_PYTHON="$HOME/.venvs/whisper/bin/python"
 ```
+
+При нестандартном расположении venv укажи его абсолютный путь и добавь этот
+`export` в настройки используемой оболочки, если нужен постоянный выбор.
 
 ### Шаг 3. Установить Whisper-бэкенд по платформе
 
 **Apple Silicon — whisper.cpp с Metal:**
 
 ```bash
-pip install cmake
+brew install cmake
 git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
-cd ~/whisper.cpp
-cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j 8
-bash models/download-ggml-model.sh large-v3         # ~3 ГБ, обязательная модель
+cmake -S "$HOME/whisper.cpp" -B "$HOME/whisper.cpp/build" -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build "$HOME/whisper.cpp/build" --config Release -j 8
+bash "$HOME/whisper.cpp/models/download-ggml-model.sh" large-v3  # ~3 ГБ
 ```
 
 **Linux, Windows и Intel Mac — faster-whisper:**
 
 ```bash
-pip install faster-whisper
+uv pip install --python ~/.venvs/whisper/bin/python faster-whisper
 ```
+
+Без uv: `~/.venvs/whisper/bin/python -m pip install faster-whisper`.
 
 `faster-whisper` скачает `large-v3` при первом запуске. В обоих случаях скилл
 использует `quality`, beam=5 и не предлагает выбор модели.
@@ -242,10 +277,8 @@ uv pip install --python ~/.venvs/whisper/bin/python pyannote.audio
 
 ### Шаг 6. Проверить, что всё на месте
 
-Для **Claude Code**:
-
 ```bash
-python3 ~/.claude/skills/meeting-transcribe/scripts/setup_check.py
+python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/setup_check.py"
 ```
 
 Wizard покажет, что установлено и чего не хватает, и явно напечатает, какими
@@ -254,7 +287,18 @@ Wizard покажет, что установлено и чего не хвата
 
 ## Использование в агенте
 
-После установки скилл работает сразу — Claude Code автоматически подхватывает скиллы из `~/.claude/skills/`, OpenAI Codex CLI — из `~/.agents/skills/`. Базовый сценарий и список явных уточнений — в разделе [«Как пользоваться»](#как-пользоваться) выше.
+После установки открой новую сессию агента. Claude Code находит скилл в
+`~/.claude/skills/`, Codex — в `~/.agents/skills/`. В Codex можно явно вызвать
+его: `$meeting-transcribe разбери запись /полный/путь/meeting.m4a`.
+Автоматический выбор по запросу также включён в `agents/openai.yaml`.
+Если новый скилл не появился, перезапусти Codex.
+
+Рабочая папка задачи может отличаться от каталога скилла: агент запускает
+скрипты по абсолютному пути и использует абсолютный путь к записи. Разрешения
+локальной задачи должны позволять прочитать запись и сохранить результаты
+рядом с ней. Для Codex CLI каталог результатов вне рабочей папки можно
+добавить через `--add-dir /полный/путь/к/записям`.
+Базовый сценарий и список уточнений — в разделе [«Как пользоваться»](#как-пользоваться) выше.
 
 Под капотом ассистент:
 1. сообщит длительность и оценку времени, не предлагая модель или пресет,
@@ -270,8 +314,7 @@ Wizard покажет, что установлено и чего не хвата
 Штатный двойной workflow можно запустить и вручную:
 
 ```bash
-~/.venvs/whisper/bin/python3 \
-  ~/.claude/skills/meeting-transcribe/scripts/dual_transcribe.py run \
+python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/dual_transcribe.py" run \
   ~/meeting.mp4 \
   --whisper-backend whisper-cpp
 ```
@@ -288,12 +331,11 @@ Wizard покажет, что установлено и чего не хвата
 `scripts/transcribe.py` больше не принимает `--preset`, `--model` и
 `--beam-size`: политика модели зафиксирована в коде, а не в аргументах.
 
-Если Whisper-бэкенд стоит в venv (`faster-whisper`, `resemblyzer`,
-`pyannote`), запускай скрипты интерпретатором этого venv либо укажи его один
-раз: `export WHISPER_PYTHON=~/.venvs/whisper/bin/python`. `dual_transcribe.py`
-и `setup_check.py` берут интерпретатор оттуда — иначе системный `python3`
-честно ответит «бэкендов нет», хотя всё установлено. whisper.cpp — отдельный
-бинарник, ему интерпретатор безразличен.
+`dual_transcribe.py` и `setup_check.py` выбирают интерпретатор Whisper из
+`WHISPER_PYTHON`, затем из стандартного `~/.venvs/whisper`, затем используют
+текущий Python. Для GigaAM — `GIGAAM_PYTHON` либо `~/.venvs/asr`.
+Если пакеты лежат в другом venv, задай соответствующую переменную окружения.
+whisper.cpp — отдельный бинарник.
 
 ## Структура проекта
 
@@ -340,17 +382,21 @@ export MEETING_TRANSCRIBE_NO_UPDATE_CHECK=1
 **Обновление вручную:**
 
 ```bash
-python3 ~/.claude/skills/meeting-transcribe/scripts/check_update.py --update
+python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/check_update.py" --update
 ```
 
-Команда отказывается работать и ничего не трогает, если в каталоге скилла есть незакоммиченные правки, если он не под git (например, распакованная копия — тогда обновление только заменой каталога) или если скилл установлен плагином — плагины обновляет сам Claude Code. Новая версия начинает действовать со следующей сессии: текущая уже держит `SKILL.md` в контексте.
+Команда отказывается работать и ничего не трогает, если в каталоге скилла есть незакоммиченные правки, если он не под git (например, распакованная копия — тогда обновление только заменой каталога) или если скилл находится в хранилище плагинов Claude Code или Codex — такую копию обновляет менеджер плагинов приложения. Новая версия начинает действовать со следующей сессии: текущая уже держит `SKILL.md` в контексте.
 
-Диагностика без обращения к сети — `python3 scripts/check_update.py --status`.
+Диагностика без обращения к сети:
+
+```bash
+python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/check_update.py" --status
+```
 
 ## Если что-то не работает
 
-1. Запусти `python3 scripts/setup_check.py` — покажет, чего не хватает.
-2. См. `references/troubleshooting.md` — типичные проблемы.
+1. Запусти `python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/setup_check.py"` — покажет, чего не хватает.
+2. См. [references/troubleshooting.md](references/troubleshooting.md) — типичные проблемы.
 
 ## Лицензия и зависимости
 

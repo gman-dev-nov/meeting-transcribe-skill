@@ -272,7 +272,7 @@ def main() -> int:
     # Приоритет в transcribe.py: whisper-cpp → faster-whisper → mlx-whisper.
     whisper_quality_usable = wcpp_has_v3 or has_mlx or has_fw
     if has_gigaam and whisper_quality_usable:
-        print("  • Русская речь: параллельные GigaAM + Whisper с LLM-сверкой.")
+        print("  • Русская речь: полные GigaAM + Whisper по очереди, затем LLM-сверка.")
     elif whisper_quality_usable:
         print("  • Русская речь: ⚠️ только Whisper; двойная сверка недоступна без GigaAM.")
     elif has_gigaam and has_wcpp_bin:
