@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,76 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(lex.match("гардрейлы")[0], "guardrail")
 
 
+class MergeTermsTests(unittest.TestCase):
+    """Наложение личного словаря на встроенный (merge_terms)."""
+
+    def merged(self, built_in_terms, user_terms) -> "hybrid.Lexicon":
+        return hybrid.Lexicon(
+            {"version": 1, "terms": hybrid.merge_terms(built_in_terms, user_terms)})
+
+    def test_user_auto_unblocks_builtin_suggest_form(self):
+        # Встроенное «аппы → API» помечено suggest; пользовательская запись
+        # с той же формой и policy auto должна разрешать автозамену.
+        user = {"canonical": "API", "policy": "auto", "ru_stems": [],
+                "ru_exact": ["аппы"], "latin_variants": []}
+        lex = self.merged([API], [user])
+
+        self.assertEqual(lex.match("аппы"), ("API", "exact"))
+
+    def test_user_form_is_rebound_to_another_canonical(self):
+        # «Githab» во встроенном словаре чинится в GitHub; пользователь
+        # решил, что у него это GitLab. Остальные формы канона не страдают.
+        built_in = [
+            PROMPT,
+            {"canonical": "GitHub", "policy": "auto", "ru_stems": [],
+             "ru_exact": [], "latin_variants": ["Githab", "Geathab"]},
+        ]
+        user = {"canonical": "GitLab", "policy": "auto", "ru_stems": [],
+                "ru_exact": [], "latin_variants": ["Githab"]}
+        lex = self.merged(built_in, [user])
+
+        self.assertEqual(lex.match("Githab")[0], "GitLab")
+        self.assertEqual(lex.match("Geathab")[0], "GitHub")
+        self.assertEqual(lex.match("промта")[0], "prompt")
+
+    def test_user_stems_cover_declensions(self):
+        user = {"canonical": "Capybara", "policy": "auto",
+                "ru_stems": ["капибар"], "ru_exact": [], "latin_variants": []}
+        lex = self.merged([PROMPT], [user])
+
+        self.assertEqual(lex.match("капибару")[0], "Capybara")
+        self.assertEqual(lex.match("капибарами")[0], "Capybara")
+
+    def test_suggest_forms_of_same_canonical_survive_user_auto(self):
+        # policy принадлежит форме: пользовательская auto-форма не отменяет
+        # остальные suggest-формы того же канона.
+        user = {"canonical": "RAG", "policy": "auto", "ru_stems": [],
+                "ru_exact": ["рэг"], "latin_variants": []}
+        built_in = {"canonical": "RAG", "policy": "suggest", "ru_stems": [],
+                    "ru_exact": ["рага", "рагу"], "latin_variants": []}
+        lex = self.merged([built_in], [user])
+
+        self.assertEqual(lex.match("рэг")[0], "RAG")
+        self.assertEqual(lex.match("рага"), (None, "suggest:RAG"))
+
+
+class ToStemTests(unittest.TestCase):
+    """lexicon add режет флексию, чтобы основа покрыла склонение."""
+
+    def test_feminine_form_gives_consonant_stem(self):
+        self.assertEqual(hybrid._to_stem("капибара"), "капибар")
+        self.assertEqual(hybrid._to_stem("джиру"), "джир")
+
+    def test_hard_consonant_stem_is_unchanged(self):
+        self.assertEqual(hybrid._to_stem("промт"), "промт")
+
+    def test_four_letter_form_still_gives_stem(self):
+        self.assertEqual(hybrid._to_stem("рага"), "раг")
+
+    def test_three_letter_form_is_not_mutilated(self):
+        self.assertEqual(hybrid._to_stem("пул"), "пул")
+
+
 class FuzzyGuardTests(unittest.TestCase):
     """Нечёткая замена латиницы держится на системном словаре английского."""
 
@@ -179,12 +250,17 @@ class CliTests(unittest.TestCase):
         return path
 
     def run_cli(self, *args) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        # HOME изолируется: автозагрузка личного словаря из реального
+        # ~/.config не должна влиять на детерминизм тестов.
+        with tempfile.TemporaryDirectory() as isolated_home:
+            env = {**os.environ, "HOME": isolated_home}
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
 
     def test_dry_run_touches_nothing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -222,6 +298,124 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("кандидатов:", result.stdout)
             self.assertEqual(source.read_text(encoding="utf-8"), before)
+
+
+class LexiconCliTests(unittest.TestCase):
+    """Команды `lexicon add/list/remove/prompt` и подхват словаря в normalize."""
+
+    def run_cli(self, home: Path, *args) -> subprocess.CompletedProcess:
+        env = {**os.environ, "HOME": str(home)}
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+
+    def lexicon_path(self, home: Path) -> Path:
+        return home / ".config" / "meeting-transcribe" / "lexicon.json"
+
+    def test_add_cyrillic_defaults_to_stems_and_merges_forms(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+
+            first = self.run_cli(home, "lexicon", "add", "капибара", "Capybara")
+            second = self.run_cli(home, "lexicon", "add", "капибарра", "Capybara")
+
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            data = json.loads(self.lexicon_path(home).read_text(encoding="utf-8"))
+            self.assertEqual(len(data["terms"]), 1)
+            self.assertEqual(data["terms"][0]["policy"], "auto")
+            # Флексия отрезана: «капибара»/«капибару» — одна основа «капибар».
+            self.assertEqual(data["terms"][0]["ru_stems"],
+                             ["капибар", "капибарр"])
+
+    def test_add_latin_goes_to_latin_variants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+
+            result = self.run_cli(home, "lexicon", "add", "Geathab", "GitHub")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(self.lexicon_path(home).read_text(encoding="utf-8"))
+            self.assertEqual(data["terms"][0]["latin_variants"], ["Geathab"])
+            self.assertEqual(data["terms"][0]["ru_stems"], [])
+
+    def test_add_suggest_marks_instead_of_replacing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+
+            result = self.run_cli(home, "lexicon", "add", "рага", "RAG", "--suggest")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(self.lexicon_path(home).read_text(encoding="utf-8"))
+            self.assertEqual(data["terms"][0]["policy"], "suggest")
+            self.assertEqual(data["terms"][0]["ru_exact"], ["рага"])
+
+    def test_add_refuses_multiword_heard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+
+            result = self.run_cli(home, "lexicon", "add", "пул реквест", "PR")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(self.lexicon_path(home).exists())
+
+    def test_prompt_lists_user_canonicals_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            self.run_cli(home, "lexicon", "add", "капибара", "Capybara")
+            self.run_cli(home, "lexicon", "add", "рага", "RAG", "--suggest")
+
+            result = self.run_cli(home, "lexicon", "prompt")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Capybara", result.stdout)
+            self.assertNotIn("RAG", result.stdout)
+
+    def test_normalize_applies_user_lexicon_from_default_location(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            self.run_cli(home, "lexicon", "add", "капибара", "Capybara")
+            source = Path(temporary) / "meeting.gigaam.transcript.json"
+            source.write_text(
+                json.dumps(
+                    {"segments": [{"start": 0.0, "end": 2.0,
+                                   "text": "капибару завели",
+                                   "words": []}]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(home, "normalize", str(source))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("личный словарь", result.stdout)
+            output = Path(temporary) / "meeting.gigaam.transcript.normalized.json"
+            data = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(data["segments"][0]["text"], "Capybara завели")
+            self.assertEqual(
+                data["metadata"]["normalized"]["user_lexicon"]["terms"], 1)
+
+    def test_remove_drops_single_form_then_whole_entry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            self.run_cli(home, "lexicon", "add", "капибара", "Capybara")
+            self.run_cli(home, "lexicon", "add", "капибарра", "Capybara")
+
+            first = self.run_cli(home, "lexicon", "remove", "Capybara",
+                                 "--heard", "капибарра")
+            data = json.loads(self.lexicon_path(home).read_text(encoding="utf-8"))
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(data["terms"][0]["ru_stems"], ["капибар"])
+
+            second = self.run_cli(home, "lexicon", "remove", "Capybara")
+            data = json.loads(self.lexicon_path(home).read_text(encoding="utf-8"))
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(data["terms"], [])
 
 
 if __name__ == "__main__":

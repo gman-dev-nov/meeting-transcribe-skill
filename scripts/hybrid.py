@@ -24,6 +24,9 @@ cross-check") привела к канону «гардрейл», «пул-ре
 
 Использование:
     python hybrid.py normalize <transcript.json> [--lexicon PATH] [--dry-run]
+    python hybrid.py plan <transcript.json> [--budget N]
+    python hybrid.py lexicon add "как слышится" "канон" [--exact|--suggest]
+    python hybrid.py lexicon list | remove <канон> | prompt
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ from pathlib import Path
 from typing import Optional
 
 DEFAULT_LEXICON = Path(__file__).parent / "lexicons" / "terms.json"
+# Личный словарь живёт вне каталога скилла: обновление через check_update.py —
+# это git-pull, который отказывается работать при локальных правках, поэтому
+# файл внутри скилла либо потерялся бы при обновлении, либо блокировал бы его.
+DEFAULT_USER_LEXICON = Path("~/.config/meeting-transcribe/lexicon.json").expanduser()
 
 # Максимальная длина русского окончания, дописываемого к основе.
 MAX_ENDING = 4
@@ -176,6 +183,124 @@ class Lexicon:
         return None, ""
 
 
+# -------------- ЛИЧНЫЙ СЛОВАРЬ ПОВЕРХ ВСТРОЕННОГО --------------
+
+_VARIANT_FIELDS = ("ru_stems", "ru_exact", "latin_variants", "latin_suggest")
+
+
+def _variant_key(field: str, variant: str) -> str:
+    """Ключ сравнения словарных форм: кириллицу — по norm_ru, латиницу — по lower."""
+    return norm_ru(variant) if field.startswith("ru_") else variant.lower()
+
+
+# Флексии, которые отрезаются от словарной формы при записи основы.
+_STEM_FLEXION = set("аяоеыиэуюьй")
+
+
+def _to_stem(form: str) -> str:
+    """Отрезать флексию от словарной формы, чтобы основа покрыла склонение.
+
+    Женские и мягкие формы меняют гласную внутри слова, а не дописывают
+    окончание: «капибара → капибару», «джира → джиру». Поэтому основой
+    служит согласный каркас: капибар, джир — «капибару» и «джире» тогда
+    матчатся как основа+окончание. Мужские согласные основы («промт»)
+    не меняются.
+    """
+    last = form[-1:].lower().replace("ё", "е")
+    if len(form) > 3 and last in _STEM_FLEXION:
+        return form[:-1]
+    return form
+
+
+def merge_terms(built_in_terms: list[dict], user_terms: list[dict]) -> list[dict]:
+    """Наложить личный словарь на встроенный.
+
+    Правила наложения:
+      * словарная форма из личного словаря перекрывает встроенную — в том
+        числе переводит её из «suggest» в автоматическую замену;
+      * написание канона берётся из личной записи;
+      * policy принадлежит форме, а не канону: если пользователь добавил
+        «аппы → API» как auto, встроенное «аппы → API (suggest)» перестаёт
+        действовать, остальные suggest-формы того же канона остаются.
+
+    Выход может содержать два терма на один канон (auto и suggest) — Lexicon
+    обрабатывает их независимо.
+    """
+    user_keys = {
+        _variant_key(field, variant)
+        for term in user_terms
+        for field in _VARIANT_FIELDS
+        for variant in term.get(field) or []
+    }
+    stripped = []
+    for term in built_in_terms:
+        term = dict(term)
+        for field in _VARIANT_FIELDS:
+            term[field] = [v for v in term.get(field) or []
+                           if _variant_key(field, v) not in user_keys]
+        stripped.append(term)
+
+    buckets: dict[str, dict] = {}
+    for term in stripped + user_terms:
+        bucket = buckets.setdefault(term["canonical"].lower(), {
+            "canonical": term["canonical"],
+            "auto": {"ru_stems": [], "ru_exact": [], "latin_variants": []},
+            "suggest": {"ru_exact": [], "latin_suggest": []},
+        })
+        bucket["canonical"] = term["canonical"]      # личная запись идёт последней
+        if term.get("policy", "auto") == "auto":
+            for field in ("ru_stems", "ru_exact", "latin_variants"):
+                bucket["auto"][field].extend(term.get(field) or [])
+        else:
+            bucket["suggest"]["ru_exact"].extend(term.get("ru_exact") or [])
+            bucket["suggest"]["latin_suggest"].extend(term.get("latin_variants") or [])
+        # latin_suggest — всегда suggest, независимо от policy терма.
+        bucket["suggest"]["latin_suggest"].extend(term.get("latin_suggest") or [])
+
+    def dedupe(values: list[str], field: str) -> list[str]:
+        seen, out = set(), []
+        for value in values:
+            key = _variant_key(field, value)
+            if key not in seen:
+                seen.add(key)
+                out.append(value)
+        return out
+
+    result = []
+    for bucket in buckets.values():
+        auto = {f: dedupe(vs, f) for f, vs in bucket["auto"].items()}
+        suggest = {f: dedupe(vs, f) for f, vs in bucket["suggest"].items()}
+        if any(auto.values()):
+            result.append({"canonical": bucket["canonical"], "policy": "auto", **auto})
+        if any(suggest.values()):
+            result.append({"canonical": bucket["canonical"], "policy": "suggest",
+                           "ru_stems": [], "ru_exact": suggest["ru_exact"],
+                           "latin_variants": [], "latin_suggest": suggest["latin_suggest"]})
+    return result
+
+
+def _resolve_lexicons(args: argparse.Namespace) -> tuple[Lexicon, dict]:
+    """Собрать лексикон: встроенный словарь + личный поверх него.
+
+    Личный словарь ищется по --user-lexicon, иначе — в стандартном месте
+    (~/.config/meeting-transcribe/lexicon.json), если файл существует.
+    --no-user-lexicon отключает автозагрузку.
+    """
+    built_in = json.loads(args.lexicon.expanduser().read_text(encoding="utf-8"))
+    user_path: Optional[Path] = None
+    if getattr(args, "user_lexicon", None) is not None:
+        user_path = args.user_lexicon.expanduser()
+        if not user_path.exists():
+            raise SystemExit(f"! {user_path} не существует")
+    elif not getattr(args, "no_user_lexicon", False) and DEFAULT_USER_LEXICON.exists():
+        user_path = DEFAULT_USER_LEXICON
+    user = json.loads(user_path.read_text(encoding="utf-8")) if user_path else {"terms": []}
+    terms = merge_terms(built_in.get("terms", []), user.get("terms", []))
+    info = {"built_in_version": built_in.get("version"),
+            "user_path": user_path, "user_terms": len(user.get("terms", []))}
+    return Lexicon({"version": built_in.get("version"), "terms": terms}), info
+
+
 def restore_case(canonical: str, original_core: str, reason: str) -> str:
     """Канон пишется так, как записан в словаре.
 
@@ -310,7 +435,9 @@ def detect_signals(word: str, conf: Optional[float], low_cut: Optional[float],
 def cmd_plan(args: argparse.Namespace) -> int:
     src = args.transcript.expanduser().resolve()
     data = json.loads(src.read_text(encoding="utf-8"))
-    lex = Lexicon(json.loads(args.lexicon.expanduser().read_text(encoding="utf-8")))
+    lex, info = _resolve_lexicons(args)
+    if info["user_path"]:
+        print(f"личный словарь: {info['user_path']} ({info['user_terms']} терминов)")
 
     words: list[dict] = []
     for seg in data.get("segments", []):
@@ -381,7 +508,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
 def cmd_normalize(args: argparse.Namespace) -> int:
     src = args.transcript.expanduser().resolve()
     data = json.loads(src.read_text(encoding="utf-8"))
-    lex = Lexicon(json.loads(args.lexicon.expanduser().read_text(encoding="utf-8")))
+    lex, info = _resolve_lexicons(args)
+    if info["user_path"]:
+        print(f"личный словарь: {info['user_path']} ({info['user_terms']} терминов)")
 
     replacements: list[dict] = []
     suggestions: list[dict] = []
@@ -430,15 +559,213 @@ def cmd_normalize(args: argparse.Namespace) -> int:
         print("\n(dry-run: файлы не изменялись)")
         return 0
 
-    data.setdefault("metadata", {})["normalized"] = {
+    normalized_meta = data.setdefault("metadata", {})["normalized"] = {
         "lexicon_version": lex.version,
         "replacements": len(replacements),
         "suggestions": len(suggestions),
     }
+    if info["user_path"]:
+        normalized_meta["user_lexicon"] = {"path": str(info["user_path"]),
+                                           "terms": info["user_terms"]}
     out = src.with_suffix("")
     out = out.parent / (out.name + ".normalized.json")
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n→ {out}")
+    return 0
+
+
+# -------------- ЛИЧНЫЙ СЛОВАРЬ: ФАЙЛ И КОМАНДЫ --------------
+
+def _empty_user_lexicon() -> dict:
+    return {
+        "version": 1,
+        "note": "Личный словарь пользователя. Записи добавляются командой "
+                "`hybrid.py lexicon add` и действуют во всех следующих "
+                "транскрипциях; формы из этого файла перекрывают встроенный "
+                "словарь скилла.",
+        "terms": [],
+    }
+
+
+def _resolve_user_lexicon_path(args: argparse.Namespace) -> Path:
+    path = getattr(args, "user_lexicon", None)
+    return path.expanduser() if path is not None else DEFAULT_USER_LEXICON
+
+
+def _load_user_lexicon(path: Path) -> dict:
+    if not path.exists():
+        return _empty_user_lexicon()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"! {path} не читается как JSON: {exc}")
+    if not isinstance(data.get("terms"), list):
+        raise SystemExit(f"! {path}: поле terms должно быть списком")
+    return data
+
+
+def _save_user_lexicon(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n",
+                    encoding="utf-8")
+
+
+_HOW_APPLIED = {
+    "ru_stems": "по основе, вместе со склонениями (промта, промтом, капибару)",
+    "ru_exact": "только точная словоформа",
+    "latin_variants": "точная латинская форма",
+    "latin_suggest": "только помечается, автоматически не заменяется",
+}
+
+
+def cmd_lexicon_add(args: argparse.Namespace) -> int:
+    heard, canonical = args.heard.strip(), args.canonical.strip()
+    if not heard or not canonical:
+        print("! «как слышится» и «канон» не могут быть пустыми", file=sys.stderr)
+        return 2
+    if any(ch.isspace() for ch in heard):
+        print("! «как слышится» должно быть одним словом: движок заменяет токены, "
+              "а не фразы. Для «пул реквест» добавь каждую часть отдельной записью "
+              "или пиши через дефис.", file=sys.stderr)
+        return 2
+    if norm_ru(heard) == norm_ru(canonical) or heard.lower() == canonical.lower():
+        print(f"«{heard}» уже совпадает с каноном «{canonical}» — замена не нужна")
+        return 0
+
+    is_cyrillic = bool(CYRILLIC.search(heard))
+    if args.suggest:
+        field = "ru_exact" if is_cyrillic else "latin_suggest"
+    elif is_cyrillic:
+        field = "ru_exact" if args.exact else "ru_stems"
+    else:
+        field = "latin_variants"   # латиница и так сверяется точной формой
+    policy = "suggest" if args.suggest else "auto"
+
+    path = _resolve_user_lexicon_path(args)
+    data = _load_user_lexicon(path)
+    value = _to_stem(heard) if field == "ru_stems" else heard
+    key = _variant_key(field, value)
+
+    # Одна словарная форма принадлежит одному канону: из других записей её убираем.
+    for term in data["terms"]:
+        for other_field in _VARIANT_FIELDS:
+            term[other_field] = [v for v in term.get(other_field) or []
+                                 if _variant_key(other_field, v) != key]
+
+    target = next(
+        (t for t in data["terms"]
+         if t["canonical"].lower() == canonical.lower()
+         and t.get("policy", "auto") == policy),
+        None)
+    if target is None:
+        target = {"canonical": canonical, "policy": policy, "ru_stems": [],
+                  "ru_exact": [], "latin_variants": [], "latin_suggest": []}
+        data["terms"].append(target)
+
+    if key in {_variant_key(field, v) for v in target.get(field) or []}:
+        print(f"уже записано: {heard} → {canonical}")
+    else:
+        target.setdefault(field, []).append(value)
+        if policy == "suggest":
+            how = "омоним: только помечается, автоматически не заменяется"
+        else:
+            how = _HOW_APPLIED[field]
+            if field == "ru_stems" and value != heard:
+                how += f"; основа: «{value}»"
+        print(f"записано: {heard} → {canonical}  ({how})")
+    _save_user_lexicon(path, data)
+    print(f"→ {path}  (записей: {len(data['terms'])})")
+    print("normalize и plan подхватят это автоматически; `lexicon prompt` "
+          "соберёт строку терминов для --initial-prompt")
+    return 0
+
+
+def cmd_lexicon_remove(args: argparse.Namespace) -> int:
+    path = _resolve_user_lexicon_path(args)
+    if not path.exists():
+        print(f"! {path} не существует — личный словарь пуст", file=sys.stderr)
+        return 1
+    data = _load_user_lexicon(path)
+    matching = [t for t in data["terms"]
+                if t["canonical"].lower() == args.canonical.lower()]
+    if not matching:
+        print(f"! «{args.canonical}» нет в личном словаре", file=sys.stderr)
+        return 1
+    if args.heard:
+        # add хранит не введённую форму, а отрезанную основу — сверяемся с обеими.
+        keys = {_variant_key("ru_exact", args.heard),
+                _variant_key("ru_stems", _to_stem(args.heard)),
+                args.heard.lower()}
+        removed = 0
+        for term in matching:
+            for field in _VARIANT_FIELDS:
+                before = len(term.get(field) or [])
+                term[field] = [v for v in term.get(field) or []
+                               if _variant_key(field, v) not in keys]
+                removed += before - len(term[field])
+        if not removed:
+            print(f"! формы «{args.heard}» у {args.canonical} в словаре нет", file=sys.stderr)
+            return 1
+        drop = {id(t) for t in matching if not any(t.get(f) for f in _VARIANT_FIELDS)}
+        data["terms"] = [t for t in data["terms"] if id(t) not in drop]
+        print(f"удалена форма: {args.heard} (канон {args.canonical})")
+    else:
+        drop = {id(t) for t in matching}
+        data["terms"] = [t for t in data["terms"] if id(t) not in drop]
+        print(f"удалена запись: {args.canonical}")
+    _save_user_lexicon(path, data)
+    print(f"→ {path}")
+    return 0
+
+
+def cmd_lexicon_list(args: argparse.Namespace) -> int:
+    built_in = json.loads(args.lexicon.expanduser().read_text(encoding="utf-8"))
+    print(f"встроенный словарь: {args.lexicon} "
+          f"({len(built_in.get('terms', []))} терминов)")
+    path = _resolve_user_lexicon_path(args)
+    data = _load_user_lexicon(path)
+    if not data["terms"]:
+        print(f"\nличный словарь пуст: {path}")
+        print('добавить: python3 scripts/hybrid.py lexicon add "как слышится" "канон"')
+        return 0
+    print(f"личный словарь: {path} ({len(data['terms'])} записей)\n")
+    for term in data["terms"]:
+        forms = ", ".join(
+            f"{v} ({field})" for field in _VARIANT_FIELDS
+            for v in term.get(field) or [])
+        mark = "  [suggest]" if term.get("policy", "auto") != "auto" else ""
+        print(f"  {term['canonical']}{mark} ← {forms}")
+    return 0
+
+
+def cmd_lexicon_prompt(args: argparse.Namespace) -> int:
+    path = _resolve_user_lexicon_path(args)
+    data = _load_user_lexicon(path)
+    canonicals: list[str] = []
+    seen: set[str] = set()
+    for term in data["terms"]:
+        if term.get("policy", "auto") == "auto":
+            key = term["canonical"].lower()
+            if key not in seen:
+                seen.add(key)
+                canonicals.append(term["canonical"])
+    if args.all:
+        built_in = json.loads(args.lexicon.expanduser().read_text(encoding="utf-8"))
+        for term in sorted(built_in.get("terms", []),
+                           key=lambda t: t["canonical"].lower()):
+            key = term["canonical"].lower()
+            if key not in seen:
+                seen.add(key)
+                canonicals.append(term["canonical"])
+    if not canonicals:
+        print(f"личный словарь пуст: {path}", file=sys.stderr)
+        return 1
+    canonicals = canonicals[: args.limit]
+    print("Термины: " + ", ".join(canonicals) + ".")
+    sys.stdout.flush()
+    print("\nпередай строку в dual_transcribe.py run … --initial-prompt "
+          "(вместе с именами участников); держись лимита ~30 терминов — "
+          "длинный промпт расшатывает декодирование Whisper", file=sys.stderr)
     return 0
 
 
@@ -450,6 +777,11 @@ def main() -> int:
     norm = sub.add_parser("normalize", help="привести термины к каноническому написанию")
     norm.add_argument("transcript", type=Path)
     norm.add_argument("--lexicon", type=Path, default=DEFAULT_LEXICON)
+    norm.add_argument("--user-lexicon", type=Path, default=None,
+                      help="путь к личному словарю (по умолчанию "
+                           "~/.config/meeting-transcribe/lexicon.json, если существует)")
+    norm.add_argument("--no-user-lexicon", action="store_true",
+                      help="игнорировать личный словарь")
     norm.add_argument("--dry-run", action="store_true",
                       help="показать, что изменится, не трогая файлы")
     norm.set_defaults(func=cmd_normalize)
@@ -457,10 +789,47 @@ def main() -> int:
     plan = sub.add_parser("plan", help="найти места, которые словарь не чинит")
     plan.add_argument("transcript", type=Path)
     plan.add_argument("--lexicon", type=Path, default=DEFAULT_LEXICON)
+    plan.add_argument("--user-lexicon", type=Path, default=None)
+    plan.add_argument("--no-user-lexicon", action="store_true")
     plan.add_argument("--budget", type=int, default=40,
                       help="сколько кандидатов оставить (по убыванию веса)")
     plan.add_argument("--json-out", type=Path, default=None)
     plan.set_defaults(func=cmd_plan)
+
+    lex = sub.add_parser("lexicon",
+                         help="личный словарь постоянных замен «как слышится → канон»")
+    lex_sub = lex.add_subparsers(dest="lex_cmd", required=True)
+
+    lex_add = lex_sub.add_parser("add", help="записать замену")
+    lex_add.add_argument("heard", help="как модель слышит слово (одним словом)")
+    lex_add.add_argument("canonical", help="как слово должно быть написано")
+    lex_add.add_argument("--exact", action="store_true",
+                         help="кириллица: только точная форма, без склонений")
+    lex_add.add_argument("--suggest", action="store_true",
+                         help="омоним: только помечать, не заменять автоматически")
+    lex_add.add_argument("--user-lexicon", type=Path, default=None)
+    lex_add.set_defaults(func=cmd_lexicon_add)
+
+    lex_rm = lex_sub.add_parser("remove", help="удалить запись или одну форму")
+    lex_rm.add_argument("canonical")
+    lex_rm.add_argument("--heard", default=None,
+                        help="удалить только эту форму, а не запись целиком")
+    lex_rm.add_argument("--user-lexicon", type=Path, default=None)
+    lex_rm.set_defaults(func=cmd_lexicon_remove)
+
+    lex_ls = lex_sub.add_parser("list", help="показать содержимое словарей")
+    lex_ls.add_argument("--lexicon", type=Path, default=DEFAULT_LEXICON)
+    lex_ls.add_argument("--user-lexicon", type=Path, default=None)
+    lex_ls.set_defaults(func=cmd_lexicon_list)
+
+    lex_prompt = lex_sub.add_parser(
+        "prompt", help="собрать строку терминов для --initial-prompt")
+    lex_prompt.add_argument("--all", action="store_true",
+                            help="включить и термины встроенного словаря")
+    lex_prompt.add_argument("--limit", type=int, default=30)
+    lex_prompt.add_argument("--lexicon", type=Path, default=DEFAULT_LEXICON)
+    lex_prompt.add_argument("--user-lexicon", type=Path, default=None)
+    lex_prompt.set_defaults(func=cmd_lexicon_prompt)
 
     args = ap.parse_args()
     if not ENGLISH_WORDS:

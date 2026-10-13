@@ -6,3 +6,8 @@ __pycache__/
 # Claude Code per-machine state — personal allowlist, paths, credentials.
 .claude/settings.local.json
 .claude/.credentials.json
+
+# Локальные артефакты: плагины ZCode и ad-hoc бенчмарки (аудио реальных созвонов, модели на гигабайты).
+.v2c/
+.video_agent/
+benchmark-*/
