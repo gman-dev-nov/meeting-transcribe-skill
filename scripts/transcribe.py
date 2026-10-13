@@ -791,10 +791,16 @@ def assign_speakers(
     пропускает слишком короткие куски; у pyannote отсутствие перекрытия обычно
     означает не-речь, и выдумывать там спикера не нужно.
     """
-    label_remap: dict = {}
-    next_id = 0
     ordered = sorted(spans, key=lambda item: item[0])
+    # Единая нумерация по голосовым интервалам, а не по ASR-сегментам:
+    # более грубая сегментация может пропустить первую короткую реплику.
+    # Иначе SPEAKER_00 обозначал бы разных людей в двух транскриптах.
+    label_remap: dict = {}
+    for _, _, label in ordered:
+        if label not in label_remap:
+            label_remap[label] = f"SPEAKER_{len(label_remap):02d}"
     for seg in segments:
+        seg.speaker = None
         best_label = None
         best_overlap = 0.0
         for s_start, s_end, label in ordered:
@@ -803,9 +809,6 @@ def assign_speakers(
                 best_overlap = overlap
                 best_label = label
         if best_label is not None:
-            if best_label not in label_remap:
-                label_remap[best_label] = f"SPEAKER_{next_id:02d}"
-                next_id += 1
             seg.speaker = label_remap[best_label]
     if backfill:
         for index, seg in enumerate(segments):
@@ -818,7 +821,7 @@ def assign_speakers(
                 if segments[other].speaker:
                     seg.speaker = segments[other].speaker
                     break
-    return len(label_remap)
+    return len({seg.speaker for seg in segments if seg.speaker is not None})
 
 
 def spans_from_labelled_segments(
@@ -952,6 +955,7 @@ def resemblyzer_spans(
     его сегментация.
     """
     try:
+        import librosa
         import numpy as np
         from resemblyzer import VoiceEncoder, preprocess_wav
         from sklearn.cluster import AgglomerativeClustering
@@ -962,8 +966,10 @@ def resemblyzer_spans(
 
     print("[resemblyzer] загружаю voice encoder…", flush=True)
     encoder = VoiceEncoder(verbose=False)
-    wav = preprocess_wav(str(audio_path))
-    sr = 16000
+    # preprocess_wav удаляет длинные паузы. Применять его ко всей записи
+    # нельзя: ASR-таймкоды относятся к исходной шкале времени, и после
+    # удаления тишины срезы попадали бы в чужие реплики или за конец массива.
+    wav, sr = librosa.load(str(audio_path), sr=16000, mono=True)
 
     print(f"[resemblyzer] эмбеддинги для {len(segments)} сегментов…", flush=True)
     embeds, indices, skipped = [], [], 0
@@ -977,6 +983,10 @@ def resemblyzer_spans(
             skipped += 1
             continue
         try:
+            chunk = preprocess_wav(chunk, source_sr=sr)
+            if len(chunk) < int(0.4 * sr):
+                skipped += 1
+                continue
             embeds.append(encoder.embed_utterance(chunk))
             indices.append(i)
         except Exception as e:
@@ -1199,7 +1209,7 @@ def build_estimate_report(duration: float, env: dict, diarizer: Optional[str]) -
 
 
 def print_estimate_table(report: dict) -> None:
-    """Красивая табличка для человека или Claude."""
+    """Красивая табличка для человека или агента."""
     print()
     print(f"📂 Длительность: {report['duration_hms']}")
     if report["diarizer"]:

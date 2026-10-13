@@ -1,0 +1,6 @@
+interface:
+  display_name: "Meeting Transcribe"
+  short_description: "Локальная расшифровка встреч, сверка и отчёт"
+
+policy:
+  allow_implicit_invocation: true

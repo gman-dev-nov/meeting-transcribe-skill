@@ -34,7 +34,9 @@ REPO = "gman-dev-nov/meeting-transcribe-skill"
 RELEASES_API_URL = "https://api.github.com/repos/{}/releases/latest".format(REPO)
 RELEASES_PAGE_URL = "https://github.com/{}/releases".format(REPO)
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+# Сохраняем путь запуска: плагин может быть симлинком на внешний git-клон.
+# detect_install проверит и этот путь, и его разрешённый вариант.
+SKILL_DIR = Path(__file__).absolute().parent.parent
 
 DISABLE_ENV = "MEETING_TRANSCRIBE_NO_UPDATE_CHECK"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -289,9 +291,9 @@ def detect_install(skill_dir=SKILL_DIR, env=None):
     Ручная копия (проверено на реальной машине: ~/.claude/skills/... без .git)
     не обновляется автоматически вообще.
 
-    Раскладки плагинов нет в публичной документации, поэтому сигналов три и
-    любой из них достаточен: реестр маркетплейсов, CLAUDE_PLUGIN_ROOT и
-    само расположение внутри ~/.claude/plugins. Путь проверяется и сырым, и
+    Сигналы установки: реестр маркетплейсов Claude Code, CLAUDE_PLUGIN_ROOT,
+    каталоги ~/.claude/plugins, ~/.codex/plugins и $CODEX_HOME/plugins.
+    Последние два соответствуют локальной раскладке Codex. Путь проверяется и сырым, и
     разрешённым: `resolve()` идёт по симлинкам, и если платформа когда-нибудь
     начнёт симлинкать хранилище, проверка только по разрешённому пути молча
     перестала бы видеть плагин. Ошибка в эту сторону — `git pull` в каталоге,
@@ -299,7 +301,7 @@ def detect_install(skill_dir=SKILL_DIR, env=None):
     "plugin".
     """
     env = os.environ if env is None else env
-    raw = Path(skill_dir)
+    raw = Path(skill_dir).absolute()
     try:
         candidates = [raw, raw.resolve()]
     except Exception:
@@ -316,11 +318,24 @@ def detect_install(skill_dir=SKILL_DIR, env=None):
             if _is_inside(candidate, plugin_root) or _is_inside(candidate, Path(plugin_root).resolve()):
                 return "plugin", "CLAUDE_PLUGIN_ROOT={}".format(plugin_root)
 
+    home = Path(env.get("HOME", "~")).expanduser()
+    codex_roots = [home / ".codex" / "plugins"]
+    if env.get("CODEX_HOME"):
+        codex_roots.append(Path(env["CODEX_HOME"]).expanduser() / "plugins")
+    for root in codex_roots:
+        roots = [root.absolute()]
+        try:
+            roots.append(root.resolve())
+        except (OSError, RuntimeError):
+            pass
+        if any(_is_inside(candidate, root_path) for candidate in candidates for root_path in roots):
+            return "plugin", "каталог плагинов Codex {}".format(root)
+
     for candidate in candidates:
         parts = candidate.parts
         for index in range(len(parts) - 1):
-            if parts[index] == ".claude" and parts[index + 1] == "plugins":
-                return "plugin", "каталог внутри ~/.claude/plugins"
+            if parts[index] in (".claude", ".codex") and parts[index + 1] == "plugins":
+                return "plugin", "каталог внутри ~/{}/plugins".format(parts[index])
 
     resolved = candidates[-1]
     if (resolved / ".git").exists():
@@ -374,8 +389,8 @@ def render_notice(summary, installed, install_kind, skill_dir=SKILL_DIR):
 
     if install_kind == "plugin":
         lines.append(
-            "Скилл установлен как плагин — обновляй его штатным механизмом Claude Code "
-            "(команда /plugin), а не из скилла."
+            "Скилл установлен как плагин — обновляй его через управление плагинами "
+            "приложения, в котором он установлен."
         )
     elif install_kind == "git":
         lines.append(
@@ -481,8 +496,8 @@ def run_update(skill_dir=SKILL_DIR, env=None):
 
     if install_kind == "plugin":
         return 1, (
-            "Скилл установлен как плагин ({}). Обновляй его штатным механизмом "
-            "Claude Code (/plugin), из скилла обновление не выполняется.".format(detail)
+            "Скилл установлен как плагин ({}). Обновляй его через управление плагинами "
+            "приложения, в котором он установлен; из скилла обновление не выполняется.".format(detail)
         )
 
     if install_kind != "git":
