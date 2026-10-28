@@ -12,20 +12,34 @@ const ENGINE = 'gigaam-duo-type-experimental';
 const KNOWN_RELEASE = 'type.v1.019.20260917';
 const KNOWN_MODEL = 'asr.gigaam_duo.v1.3';
 const REQUEST_TIMEOUT_MS = 120000;
+const PAUSE_CONFIG = Object.freeze({
+  sampleRate: SAMPLE_RATE,
+  windowSamples: 320,
+  windowMs: 20,
+  thresholdDbfs: -40,
+  minPauseSamples: 4000,
+  minPauseMs: 250,
+  maxChunkSeconds: 25,
+  readBufferSamples: 20480,
+});
 const HELP = `Usage: node duo_transcribe.cjs /absolute/input --output-dir /absolute/dir
-  [--app /Applications/Type.app] [--chunk-seconds 20]
+  [--app /Applications/Type.app] [--chunk-seconds 20] [--segmentation pause|fixed]
 
 Experimental local GigaAM Duo adapter for Type; chunk-seconds must be 1..25.
+Default segmentation: pause (local low-energy intervals, not speech VAD).
 No downloads, GUI, Type profile, LLM postprocessing, or word timestamps.
 `;
 
 function parseArgs(argv) {
-  const args = { app: '/Applications/Type.app', chunkSeconds: 20 };
+  const args = { app: '/Applications/Type.app', chunkSeconds: 20, segmentation: 'pause' };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') return { help: true };
-    const key = { '--app': 'app', '--output-dir': 'outputDir', '--chunk-seconds': 'chunkSeconds' }[arg];
+    const key = {
+      '--app': 'app', '--output-dir': 'outputDir', '--chunk-seconds': 'chunkSeconds',
+      '--segmentation': 'segmentation',
+    }[arg];
     if (key) {
       if (seen.has(key)) throw new Error(`Duplicate option: ${arg}`);
       seen.add(key);
@@ -49,6 +63,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.chunkSeconds) || args.chunkSeconds < 1 || args.chunkSeconds > 25) {
     throw new Error('--chunk-seconds must be a finite number in 1..25');
   }
+  if (!['pause', 'fixed'].includes(args.segmentation)) throw new Error('--segmentation must be pause or fixed');
   return args;
 }
 
@@ -60,6 +75,110 @@ function chunkRanges(totalSamples, chunkSeconds) {
   for (let startSample = 0; startSample < totalSamples; startSample += step) {
     const endSample = Math.min(startSample + step, totalSamples);
     chunks.push({ startSample, endSample, start: startSample / SAMPLE_RATE, end: endSample / SAMPLE_RATE });
+  }
+  return chunks;
+}
+
+function readPcmBytes(pcmFd, buffer, sampleOffset, sampleCount) {
+  const size = sampleCount * 4;
+  let read = 0;
+  while (read < size) {
+    const received = fs.readSync(pcmFd, buffer, read, size - read, sampleOffset * 4 + read);
+    if (received === 0) throw new Error('Short PCM read');
+    read += received;
+  }
+}
+
+function detectPauses(pcmFd, totalSamples) {
+  if (!Number.isSafeInteger(totalSamples) || totalSamples < 0) throw new Error('Invalid PCM sample count');
+  const { windowSamples, readBufferSamples, minPauseSamples, thresholdDbfs } = PAUSE_CONFIG;
+  const thresholdPower = 10 ** (thresholdDbfs / 10);
+  const buffer = Buffer.alloc(readBufferSamples * 4);
+  const pauses = [];
+  let lowStart = null;
+  const finishPause = endSample => {
+    if (lowStart !== null && endSample - lowStart >= minPauseSamples) {
+      pauses.push({ startSample: lowStart, endSample });
+    }
+    lowStart = null;
+  };
+  // Buffer size is a multiple of the 20ms window; low spans carry across reads.
+  for (let start = 0; start < totalSamples; start += readBufferSamples) {
+    const samplesRead = Math.min(readBufferSamples, totalSamples - start);
+    readPcmBytes(pcmFd, buffer, start, samplesRead);
+    for (let offset = 0; offset < samplesRead; offset += windowSamples) {
+      const length = Math.min(windowSamples, samplesRead - offset);
+      let power = 0;
+      for (let i = 0; i < length; i++) {
+        const sample = buffer.readFloatLE((offset + i) * 4);
+        if (!Number.isFinite(sample)) throw new Error(`Non-finite PCM sample at ${start + offset + i}`);
+        power += sample * sample;
+      }
+      if (power / length <= thresholdPower) {
+        if (lowStart === null) lowStart = start + offset;
+      } else {
+        finishPause(start + offset);
+      }
+    }
+  }
+  finishPause(totalSamples);
+  return pauses;
+}
+
+function pauseChunkRanges(totalSamples, chunkSeconds, pauses = []) {
+  if (!Number.isSafeInteger(totalSamples) || totalSamples < 0) throw new Error('Invalid PCM sample count');
+  if (!Number.isFinite(chunkSeconds) || chunkSeconds < 1 || chunkSeconds > PAUSE_CONFIG.maxChunkSeconds) {
+    throw new Error('Invalid chunk duration');
+  }
+  if (!Array.isArray(pauses)) throw new Error('Pauses must be an array');
+  let previousEnd = 0;
+  for (const pause of pauses) {
+    if (!pause || typeof pause !== 'object' || Array.isArray(pause) ||
+        !Number.isSafeInteger(pause.startSample) || !Number.isSafeInteger(pause.endSample) ||
+        pause.startSample < previousEnd || pause.startSample < 0 || pause.endSample <= pause.startSample ||
+        pause.endSample > totalSamples) {
+      throw new Error('Invalid, unsorted, or overlapping pause span');
+    }
+    previousEnd = pause.endSample;
+  }
+  const targetSamples = Math.floor(chunkSeconds * SAMPLE_RATE);
+  const lowerSamples = Math.ceil(Math.max(1, 0.6 * chunkSeconds) * SAMPLE_RATE);
+  const upperSamples = Math.min(PAUSE_CONFIG.maxChunkSeconds * SAMPLE_RATE, targetSamples + 5 * SAMPLE_RATE);
+  const chunks = [];
+  let pauseIndex = 0;
+  for (let startSample = 0; startSample < totalSamples;) {
+    const remaining = totalSamples - startSample;
+    let endSample;
+    let boundaryReason;
+    // Preserve the whole final tail, even when it exceeds the nominal target.
+    if (remaining <= upperSamples) {
+      endSample = totalSamples;
+      boundaryReason = 'final';
+    } else {
+      const minimumCut = startSample + lowerSamples;
+      const maximumCut = startSample + upperSamples;
+      const targetCut = startSample + targetSamples;
+      while (pauseIndex < pauses.length && pauses[pauseIndex].endSample <= minimumCut) pauseIndex++;
+      let candidateCut = null;
+      let distance = Infinity;
+      for (let i = pauseIndex; i < pauses.length && pauses[i].startSample < maximumCut; i++) {
+        const overlapStart = Math.max(minimumCut, pauses[i].startSample);
+        const overlapEnd = Math.min(maximumCut, pauses[i].endSample);
+        if (overlapStart >= overlapEnd) continue;
+        // Use the midpoint of the accessible part of a long pause. A 100s
+        // silence must not force cuts merely because its global midpoint is far away.
+        const midpoint = overlapStart + Math.floor((overlapEnd - overlapStart) / 2);
+        const fromTarget = Math.abs(midpoint - targetCut);
+        if (fromTarget < distance || (fromTarget === distance && midpoint < candidateCut)) {
+          candidateCut = midpoint;
+          distance = fromTarget;
+        }
+      }
+      endSample = candidateCut ?? targetCut;
+      boundaryReason = candidateCut === null ? 'forced' : 'pause';
+    }
+    chunks.push({ startSample, endSample, start: startSample / SAMPLE_RATE, end: endSample / SAMPLE_RATE, boundaryReason });
+    startSample = endSample;
   }
   return chunks;
 }
@@ -108,6 +227,7 @@ function writeOutputs(paths, document) {
       `- Движок: ${meta.engine || ENGINE}`,
       `- Модель: ${meta.model || 'unknown'}; Type: ${meta.app_version || 'unknown'}`,
       '- LLM: выключена. Временные метки относятся к чанкам, а не к словам.',
+      `- Разбиение: ${meta.segmentation?.method || 'fixed'}; срезов без паузы: ${meta.segmentation?.forced_cuts ?? 'unknown'}.`,
       '- На границах чанков возможны обрывы и ошибки.', '',
       ...document.segments.map(s => `[${timestamp(s.start)}–${timestamp(s.end)}] ${s.text}`), '',
     ];
@@ -261,12 +381,13 @@ async function main(argv = process.argv.slice(2)) {
   const duration = Number(execFileSync(ffprobe, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 }).trim());
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('ffprobe returned an invalid audio duration');
-  process.stderr.write('WARNING: experimental Type native adapter; LLM disabled; no word timestamps. Fixed chunk boundaries may cut words.\n');
+  process.stderr.write(`WARNING: experimental Type native adapter; LLM disabled; no word timestamps. Segmentation=${args.segmentation}; energy pauses are not speech VAD and boundaries may cut words.\n`);
   let model;
   let runtime;
   const callbacks = createResultCallbacks();
   let pcmFd;
   let decodedDuration;
+  let segmentation;
   const started = Date.now();
   const segments = [];
   try {
@@ -278,6 +399,24 @@ async function main(argv = process.argv.slice(2)) {
     if (!pcmBytes || pcmBytes % 4) throw new Error('ffmpeg produced invalid float32 PCM');
     const totalSamples = pcmBytes / 4;
     decodedDuration = totalSamples / SAMPLE_RATE;
+    pcmFd = fs.openSync(pcmPath, 'r');
+    const pauses = args.segmentation === 'pause' ? detectPauses(pcmFd, totalSamples) : [];
+    const ranges = args.segmentation === 'pause'
+      ? pauseChunkRanges(totalSamples, args.chunkSeconds, pauses)
+      : chunkRanges(totalSamples, args.chunkSeconds).map((chunk, index, all) => ({
+        ...chunk, boundaryReason: index === all.length - 1 ? 'final' : 'forced',
+      }));
+    segmentation = {
+      method: args.segmentation,
+      window_ms: PAUSE_CONFIG.windowMs,
+      threshold_dbfs: PAUSE_CONFIG.thresholdDbfs,
+      min_pause_ms: PAUSE_CONFIG.minPauseMs,
+      target_chunk_seconds: args.chunkSeconds,
+      max_chunk_seconds: PAUSE_CONFIG.maxChunkSeconds,
+      detected_pauses: args.segmentation === 'pause' ? pauses.length : null,
+      forced_cuts: ranges.filter(chunk => chunk.boundaryReason === 'forced').length,
+      boundaries: ranges.map(chunk => ({ end_sample: chunk.endSample, end: chunk.end, reason: chunk.boundaryReason })),
+    };
     const addon = require(addonPath);
     const openPromise = Promise.resolve().then(() => addon.open({
       modelRoot: model.tempRoot,
@@ -288,17 +427,19 @@ async function main(argv = process.argv.slice(2)) {
     try { runtime = await withTimeout(openPromise, REQUEST_TIMEOUT_MS, 'Native runtime open'); }
     catch (error) { openPromise.then(r => r.close()).catch(() => {}); throw error; }
     if (!runtime.features().includes('llm_off')) throw new Error('Native runtime did not confirm llm_off');
-    pcmFd = fs.openSync(pcmPath, 'r');
-    const ranges = chunkRanges(totalSamples, args.chunkSeconds);
     for (const [index, chunk] of ranges.entries()) {
       const bytes = Buffer.alloc((chunk.endSample - chunk.startSample) * 4);
-      if (fs.readSync(pcmFd, bytes, 0, bytes.length, chunk.startSample * 4) !== bytes.length) throw new Error('Short PCM read');
+      readPcmBytes(pcmFd, bytes, chunk.startSample, bytes.length / 4);
       // Decode explicitly as little endian, independent of Buffer alignment.
       const samples = new Float32Array(bytes.length / 4);
-      for (let i = 0; i < samples.length; i++) samples[i] = bytes.readFloatLE(i * 4);
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = bytes.readFloatLE(i * 4);
+        if (!Number.isFinite(samples[i])) throw new Error(`Non-finite PCM sample at ${chunk.startSample + i}`);
+      }
+      if (samples.length > PAUSE_CONFIG.maxChunkSeconds * SAMPLE_RATE) throw new Error('ASR chunk exceeds 25 seconds');
       const text = await callbacks.request(() => {
         if (!runtime.startRecording()) throw new Error('Native startRecording failed');
-        const paddingSamples = Math.min(8000, Math.floor((25 * SAMPLE_RATE - samples.length) / 2));
+        const paddingSamples = Math.min(8000, Math.floor((PAUSE_CONFIG.maxChunkSeconds * SAMPLE_RATE - samples.length) / 2));
         if (paddingSamples) runtime.pushAudio(new Float32Array(paddingSamples));
         for (let i = 0; i < samples.length; i += 1600) runtime.pushAudio(samples.subarray(i, i + 1600));
         if (paddingSamples) runtime.pushAudio(new Float32Array(paddingSamples));
@@ -323,6 +464,7 @@ async function main(argv = process.argv.slice(2)) {
       text_source: 'onAsrText',
       duration_seconds: decodedDuration, source_duration_seconds: duration,
       chunk_seconds: args.chunkSeconds, segments_count: segments.length,
+      segmentation,
       processing_seconds: (Date.now() - started) / 1000,
     },
     segments,
@@ -331,7 +473,7 @@ async function main(argv = process.argv.slice(2)) {
   process.stdout.write(JSON.stringify(outputs) + '\n');
 }
 
-module.exports = { parseArgs, chunkRanges, outputPaths, writeOutputs, createResultCallbacks };
+module.exports = { parseArgs, chunkRanges, detectPauses, pauseChunkRanges, PAUSE_CONFIG, outputPaths, writeOutputs, createResultCallbacks };
 if (require.main === module) main().catch(error => {
   process.stderr.write(`Duo experiment failed: ${error.message}\n`);
   // A timed-out native close may retain its worker handles; cleanup was attempted

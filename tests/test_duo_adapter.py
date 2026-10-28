@@ -658,8 +658,8 @@ assert.deepEqual(fs.readdirSync(directory), []);
             (models / "core.tar").write_bytes(b"fake core")
             (binaries / "gigatype_runtime.node").write_bytes(b"mock addon")
             for name, body in (
-                ("ffprobe", "print('3')"),
-                ("ffmpeg", "import sys\nopen(sys.argv[-1],'wb').write(b'\\0'*(16000*4*3))"),
+                ("ffprobe", "import os\nprint(int(os.environ.get('DUO_FAKE_SAMPLES', '48000'))/16000)"),
+                ("ffmpeg", "import sys,os\nopen(sys.argv[-1],'wb').write(b'\\0'*(4*int(os.environ.get('DUO_FAKE_SAMPLES', '48000'))))"),
             ):
                 executable = binaries / name
                 executable.write_text("#!/usr/bin/env python3\n" + body + "\n")
@@ -677,9 +677,13 @@ require('node:module')._extensions['.node'] = module => {
       root: options.modelRoot, features: options.features,
       meta: JSON.parse(fs.readFileSync(options.modelRoot + '/meta.json', 'utf8')),
     }));
-    let count = 0;
+    let count = 0, inputSamples = 0;
     return {
-      features: () => ['llm_off'], startRecording: () => true, pushAudio: () => {},
+      features: () => ['llm_off'], startRecording: () => { inputSamples = 0; return true; },
+      pushAudio: samples => {
+        inputSamples += samples.length;
+        if (inputSamples > 25 * 16000) throw new Error('native input exceeds 25s including padding');
+      },
       stopRecording: () => {
         count++;
         const mode = process.env.DUO_FAKE_MODE;
@@ -694,15 +698,24 @@ require('node:module')._extensions['.node'] = module => {
 """)
             audio = root / "input with spaces.wav"
             audio.write_bytes(b"mock input")
-            for mode in ("success", "incomplete", "error"):
-                with self.subTest(mode=mode):
-                    output = root / (mode + " output")
-                    audit, closed = root / (mode + ".json"), root / (mode + ".closed")
+            for mode, segmentation, samples, chunk_seconds in (
+                ("success", "fixed", 48000, "1.5"),
+                ("success", "pause", 48000, "1.5"),
+                ("success", "fixed", 416000, "25"),
+                ("incomplete", "pause", 48000, "1.5"),
+                ("error", "fixed", 48000, "1.5"),
+            ):
+                with self.subTest(mode=mode, segmentation=segmentation, samples=samples):
+                    scenario = f"{mode}-{segmentation}-{samples}"
+                    output = root / (scenario + " output")
+                    audit, closed = root / (scenario + ".json"), root / (scenario + ".closed")
                     env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ.get("PATH", ""),
-                           "DUO_FAKE_MODE": mode, "DUO_FAKE_AUDIT": str(audit), "DUO_FAKE_CLOSED": str(closed)}
+                           "DUO_FAKE_MODE": mode, "DUO_FAKE_AUDIT": str(audit), "DUO_FAKE_CLOSED": str(closed),
+                           "DUO_FAKE_SAMPLES": str(samples)}
                     proc = subprocess.run(
                         [NODE, "--require", str(preload), str(SCRIPT), str(audio),
-                         "--app", str(app), "--output-dir", str(output), "--chunk-seconds", "1.5"],
+                         "--app", str(app), "--output-dir", str(output), "--chunk-seconds", chunk_seconds,
+                         "--segmentation", segmentation],
                         env=env, capture_output=True, text=True, timeout=CALL_TIMEOUT,
                     )
                     self.assertEqual(proc.returncode, 0 if mode == "success" else 1, proc.stderr)
@@ -716,10 +729,12 @@ require('node:module')._extensions['.node'] = module => {
                         self.assertFalse(output.exists())
                         continue
                     document = json.loads(next(output.glob("*.json")).read_text())
-                    self.assertEqual(document["segments"], [
-                        {"start": 0, "end": 1.5, "text": "raw 1"},
-                        {"start": 1.5, "end": 3, "text": "raw 2"},
-                    ])
+                    expected = ([{"start": 0, "end": 3, "text": "raw 1"}]
+                                if segmentation == "pause" else
+                                [{"start": 0, "end": float(chunk_seconds), "text": "raw 1"},
+                                 {"start": float(chunk_seconds), "end": samples / SAMPLE_RATE, "text": "raw 2"}])
+                    self.assertEqual(document["segments"], expected)
+                    self.assertEqual(document["metadata"]["segmentation"]["method"], segmentation)
                     self.assertFalse(document["metadata"]["llm_enabled"])
                     self.assertEqual(document["metadata"]["timing_precision"], "segment")
                     self.assertEqual(document["metadata"]["text_source"], "onAsrText")

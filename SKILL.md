@@ -293,7 +293,7 @@ python3 scripts/check_update.py --update
 - `scripts/check_update.py` — проверка обновлений после отчёта и обновление по согласию.
 - `references/discrepancy-review.md` — обязательный контракт LLM и проверки человеком.
 - `references/quality-review.md` — самоисправления, редакторские правки и точные привязки к raw.
-- `references/duo-experiment.md` — опциональный эксперимент с установленным Type; не штатная замена GigaAM/Whisper.
+- `references/duo-experiment.md` — опциональный Duo из установленного Type, нарезка по паузам и контрольный fixed; результаты проверки и границы выводов — в `references/duo-evaluation.md`. Основной GigaAM/Whisper сохранён.
 - `references/setup.md` — установка ffmpeg, Python, whisper.cpp, HF_TOKEN.
 - `references/backends.md` — детали бэкендов, фиксированной модели и диаризаторов.
 - `references/troubleshooting.md` — типичные проблемы.
