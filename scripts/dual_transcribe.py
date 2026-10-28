@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import hashlib
 import json
 import math
 import os
@@ -432,6 +434,34 @@ def _merge_nearby(
     return merged
 
 
+def transcript_segments_sha256(data: dict) -> str:
+    payload = json.dumps(data.get("segments", []), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def transcript_diagnostics(data: dict, duration: float) -> dict:
+    """Сигналы подозрительного вывода; они не выбирают правильную ASR-версию."""
+    texts = [normalize_token(str(s.get("text", ""))) for s in data.get("segments", [])]
+    texts = [text for text in texts if text]
+    counts: dict[str, int] = {}
+    for text in texts:
+        counts[text] = counts.get(text, 0) + 1
+    most_repeated = max(counts.values(), default=0)
+    fraction = most_repeated / len(texts) if texts else 0.0
+    zero_duration = sum(1 for s in data.get("segments", [])
+                        if s.get("text", "").strip() and float(s["end"]) <= float(s["start"]))
+    warnings = []
+    if duration >= 30 and most_repeated >= 4 and fraction >= 0.5:
+        warnings.append("suspected_repetition")
+    if zero_duration >= 3:
+        warnings.append("zero_duration_segments")
+    return {"warnings": warnings, "nonempty_segments": len(texts),
+            "most_repeated_segment_count": most_repeated,
+            "most_repeated_segment_fraction": round(fraction, 4),
+            "zero_duration_segments": zero_duration}
+
+
 def build_comparison(
     gigaam_data: dict,
     whisper_data: dict,
@@ -500,11 +530,13 @@ def build_comparison(
             "gigaam": {
                 "artifact_ref": gigaam_data.get("_artifact_path"),
                 "model": g_meta.get("model", "gigaam"),
+                "segments_sha256": transcript_segments_sha256(gigaam_data),
             },
             "whisper": {
                 "artifact_ref": whisper_data.get("_artifact_path"),
                 "model": w_meta.get("model", "whisper"),
                 "backend": w_meta.get("backend"),
+                "segments_sha256": transcript_segments_sha256(whisper_data),
             },
         },
         "policy": {
@@ -515,6 +547,10 @@ def build_comparison(
         "summary": {
             "candidate_count": len(candidates),
             "word_timing_precision": precision,
+        },
+        "diagnostics": {
+            "gigaam": transcript_diagnostics(gigaam_data, duration),
+            "whisper": transcript_diagnostics(whisper_data, duration),
         },
         "candidates": candidates,
     }
@@ -616,8 +652,111 @@ def _resolve_gigaam_device(python: str, requested: str) -> str:
     return device
 
 
+# -------------- ПОДСКАЗКА WHISPER ИЗ ЛИЧНОГО СЛОВАРЯ --------------
+
+# Тот же стандартный путь, что DEFAULT_USER_LEXICON в hybrid.py: личный
+# словарь живёт вне каталога скилла, чтобы переживать его обновления.
+DEFAULT_USER_LEXICON = Path("~/.config/meeting-transcribe/lexicon.json").expanduser()
+
+_prompt_module = None
+
+
+def _prompt_builder():
+    """Построитель ограниченной строки терминов из hybrid.py.
+
+    Файл загружается по пути: scripts/ не обязан быть в sys.path (скилл и
+    тесты запускают скрипты напрямую). Нужен только lexicon_prompt_text —
+    чистый helper, общий с командой `hybrid.py lexicon prompt`.
+    """
+    global _prompt_module
+    if _prompt_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "meeting_transcribe_hybrid", SCRIPT_DIR / "hybrid.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        _prompt_module = module
+    return _prompt_module
+
+
+def _auto_lexicon_terms(data: dict) -> list[str]:
+    """Канонические термины с policy=auto из личного словаря.
+
+    suggest-термины омонимичны обычным русским словам и в промпт не идут.
+    Встроенный словарь скилла и текущий транскрипт GigaAM не используются:
+    промпт строится только из подтверждённого личного словаря.
+    """
+    terms: list[str] = []
+    for index, term in enumerate(data.get("terms", [])):
+        if not isinstance(term, dict):
+            raise ValueError(f"личный словарь: terms[{index}] должен быть объектом")
+        policy = term.get("policy", "auto")
+        if policy not in ("auto", "suggest"):
+            raise ValueError(f"личный словарь: terms[{index}] имеет неизвестную policy")
+        if policy != "auto":
+            continue
+        canonical = term.get("canonical")
+        if not isinstance(canonical, str) or not canonical.strip():
+            raise ValueError(
+                f"личный словарь: terms[{index}].canonical должен быть "
+                "непустой строкой"
+            )
+        terms.append(canonical)
+    return terms
+
+
+def resolve_whisper_prompt(args: argparse.Namespace) -> Optional[str]:
+    """Собрать initial-prompt для Whisper: текст пользователя плюс термины.
+
+    По умолчанию подхватывается DEFAULT_USER_LEXICON, если файл существует;
+    его отсутствие — норма, а вот существующий повреждённый файл — явная
+    ошибка до inference. Явный --user-lexicon обязан существовать.
+    --no-lexicon-prompt отключает словарную часть целиком. Термины
+    дописываются в конец и не затирают текст пользователя.
+    """
+    user_prompt = getattr(args, "initial_prompt", None)
+    if getattr(args, "no_lexicon_prompt", False):
+        return user_prompt
+    explicit = getattr(args, "user_lexicon", None)
+    if explicit is not None:
+        path = Path(explicit).expanduser()
+        if not path.is_file():
+            raise ValueError(f"личный словарь не найден: {path}")
+    else:
+        path = DEFAULT_USER_LEXICON
+        if not path.exists():
+            return user_prompt
+        if not path.is_file():
+            raise ValueError(f"личный словарь должен быть файлом: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"личный словарь не читается как JSON: {path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("terms"), list):
+        raise ValueError(f"личный словарь {path}: поле terms должно быть списком")
+    if type(data.get("version", 1)) is not int or data.get("version", 1) != 1:
+        raise ValueError(f"личный словарь {path}: неподдерживаемая version")
+    lexicon_prompt = _prompt_builder().lexicon_prompt_text(_auto_lexicon_terms(data))
+    if not lexicon_prompt:
+        return user_prompt
+    if user_prompt and user_prompt.strip():
+        return f"{user_prompt.rstrip()} {lexicon_prompt}"
+    return lexicon_prompt
+
+
 def build_asr_commands(args: argparse.Namespace, staging_dir: Path) -> dict[str, list[str]]:
     source = args.input.expanduser().resolve()
+    # Дешёвые проверки аргументов и личного словаря — до subprocess'ов:
+    # ошибка должна всплывать здесь, а не после дорогих проходов ASR.
+    language = getattr(args, "whisper_language", "ru")
+    if language not in {"ru", "auto", "en"}:
+        raise ValueError(
+            f"недопустимый язык Whisper: {language!r} (допустимо ru, auto, en)"
+        )
+    initial_prompt = resolve_whisper_prompt(args)
     gigaam_python = _resolve_executable(args.gigaam_python, "Python для GigaAM")
     whisper_python = _resolve_executable(args.whisper_python, "Python для Whisper")
     gigaam_device = _resolve_gigaam_device(gigaam_python, args.gigaam_device)
@@ -636,12 +775,14 @@ def build_asr_commands(args: argparse.Namespace, staging_dir: Path) -> dict[str,
         "--suffix",
         ".gigaam",
     ]
+    # Настройка языка относится только к Whisper: GigaAM — русскоязычная
+    # модель и всегда идёт отдельным полным проходом без этого флага.
     whisper = [
         whisper_python,
         str(WHISPER_SCRIPT),
         str(source),
         "--language",
-        "ru",
+        language,
         "--word-timestamps",
         "--yes",
         "--output-dir",
@@ -651,8 +792,8 @@ def build_asr_commands(args: argparse.Namespace, staging_dir: Path) -> dict[str,
     ]
     if args.whisper_backend:
         whisper.extend(["--backend", args.whisper_backend])
-    if args.initial_prompt:
-        whisper.extend(["--initial-prompt", args.initial_prompt])
+    if initial_prompt:
+        whisper.extend(["--initial-prompt", initial_prompt])
     if args.no_condition_on_previous_text:
         whisper.append("--no-condition-on-previous-text")
     # Диаризация не встраивается в ASR-проход: спикеры считаются один раз
@@ -1271,13 +1412,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
     )
     run.add_argument(
+        "--whisper-language",
+        choices=["ru", "auto", "en"],
+        default="ru",
+        help="Язык прохода Whisper: ru (по умолчанию), auto или en. "
+             "Касается только Whisper — GigaAM всегда идёт отдельным полным "
+             "проходом без этой настройки. auto включает автодетект языка; "
+             "это удобство, а не доказанное улучшение точности.",
+    )
+    run.add_argument(
         "--parallel",
         action="store_true",
         help="Запускать оба движка одновременно. По умолчанию они идут по "
              "очереди: на машине с общей памятью параллельный запуск даёт "
              "многократное замедление при выигрыше в минуту.",
     )
-    run.add_argument("--initial-prompt", default=None)
+    run.add_argument(
+        "--initial-prompt",
+        default=None,
+        help="Стартовая подсказка только для прохода Whisper (например, имена "
+             "участников). Термины из личного словаря дописываются в конец и "
+             "не затирают этот текст.",
+    )
+    run.add_argument(
+        "--user-lexicon",
+        type=Path,
+        default=None,
+        help="Явный путь к личному словарю для подсказки Whisper; файл обязан "
+             "существовать и быть корректным JSON (по умолчанию "
+             "~/.config/meeting-transcribe/lexicon.json, если файл существует)",
+    )
+    run.add_argument(
+        "--no-lexicon-prompt",
+        action="store_true",
+        help="Не дополнять initial-prompt терминами из личного словаря",
+    )
     run.add_argument("--no-condition-on-previous-text", action="store_true")
     run.add_argument("--diarize", action="store_true")
     run.add_argument(

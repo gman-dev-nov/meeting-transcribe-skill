@@ -418,5 +418,83 @@ class LexiconCliTests(unittest.TestCase):
             self.assertEqual(data["terms"], [])
 
 
+class LexiconPromptTextTests(unittest.TestCase):
+    """Чистый построитель ограниченной строки терминов (общий с dual)."""
+
+    def test_dedup_is_case_insensitive_and_keeps_first_spelling(self):
+        prompt = hybrid.lexicon_prompt_text(["Capybara", "capybara", "RAG"])
+
+        self.assertEqual(prompt, "Термины: Capybara, RAG.")
+
+    def test_limit_caps_unique_terms(self):
+        prompt = hybrid.lexicon_prompt_text(
+            [f"T{i:02d}" for i in range(1, 36)], limit=10
+        )
+
+        listed = prompt[len("Термины: "):-1].split(", ")
+        self.assertEqual(listed, [f"T{i:02d}" for i in range(1, 11)])
+
+    def test_char_bound_never_cuts_a_word(self):
+        long_a, long_b = "a" * 40, "b" * 40
+
+        prompt = hybrid.lexicon_prompt_text([long_a, long_b, "ok"], max_chars=60)
+
+        # Второй 40-символьный термин целиком не влезает — пропущен; более
+        # короткий третий умещается без обрезки.
+        self.assertLessEqual(len(prompt), 60)
+        self.assertIn(long_a, prompt)
+        self.assertNotIn(long_b, prompt)
+        self.assertTrue(prompt.endswith("ok."))
+
+    def test_single_too_long_term_is_skipped_not_truncated(self):
+        huge = "x" * 1001
+
+        self.assertEqual(hybrid.lexicon_prompt_text([huge]), "")
+        self.assertEqual(hybrid.lexicon_prompt_text([huge, "ok"]), "Термины: ok.")
+
+    def test_empty_and_blank_terms_give_empty_string(self):
+        self.assertEqual(hybrid.lexicon_prompt_text([]), "")
+        self.assertEqual(hybrid.lexicon_prompt_text(["", "  "]), "")
+
+
+class LexiconPromptCliSemanticsTests(unittest.TestCase):
+    """`lexicon prompt` сохраняет смысл после перехода на общий helper."""
+
+    def run_cli(self, home: Path, *args) -> subprocess.CompletedProcess:
+        env = {**os.environ, "HOME": str(home)}
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+
+    def test_all_prints_builtin_terms_and_stderr_hint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            built_in = json.loads(LEXICON.read_text(encoding="utf-8"))
+            first_sorted = sorted(
+                built_in["terms"], key=lambda t: t["canonical"].lower()
+            )[0]["canonical"]
+
+            result = self.run_cli(home, "lexicon", "prompt", "--all")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith("Термины: "))
+            self.assertIn(first_sorted, result.stdout)
+            self.assertIn("dual_transcribe.py", result.stderr)
+            self.assertIn("--initial-prompt", result.stderr)
+
+    def test_empty_lexicon_without_all_exits_one(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+
+            result = self.run_cli(home, "lexicon", "prompt")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("личный словарь пуст", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
