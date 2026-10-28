@@ -738,30 +738,73 @@ def cmd_lexicon_list(args: argparse.Namespace) -> int:
     return 0
 
 
+# Ограничения строки терминов: длинный initial-prompt расшатывает
+# декодирование Whisper, поэтому она ограничена и по количеству терминов,
+# и по общей длине.
+LEXICON_PROMPT_LIMIT = 30
+LEXICON_PROMPT_MAX_CHARS = 1000
+
+
+def lexicon_prompt_text(
+    canonicals: list[str],
+    *,
+    limit: int = LEXICON_PROMPT_LIMIT,
+    max_chars: int = LEXICON_PROMPT_MAX_CHARS,
+) -> str:
+    """Собрать ограниченную строку «Термины: …» для --initial-prompt.
+
+    Чистый helper, общий для `lexicon prompt` и dual_transcribe: не более
+    `limit` уникальных (без учёта регистра) терминов и не более `max_chars`
+    символов на всю строку. Термин, не влезающий целиком, пропускается —
+    обрезанное слово в промпте хуже его отсутствия; за ним могут уместиться
+    более короткие. Пустой список (или ничего не влезло) даёт "".
+    """
+    prefix, suffix = "Термины: ", "."
+    seen: set[str] = set()
+    selected: list[str] = []
+    length = len(prefix) + len(suffix)
+    for value in canonicals:
+        if len(selected) >= limit:
+            break
+        term = " ".join(str(value).split())
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        piece = term if not selected else ", " + term
+        if length + len(piece) > max_chars:
+            continue
+        selected.append(term)
+        length += len(piece)
+    if not selected:
+        return ""
+    return prefix + ", ".join(selected) + suffix
+
+
 def cmd_lexicon_prompt(args: argparse.Namespace) -> int:
     path = _resolve_user_lexicon_path(args)
     data = _load_user_lexicon(path)
-    canonicals: list[str] = []
-    seen: set[str] = set()
-    for term in data["terms"]:
-        if term.get("policy", "auto") == "auto":
-            key = term["canonical"].lower()
-            if key not in seen:
-                seen.add(key)
-                canonicals.append(term["canonical"])
+    canonicals: list[str] = [
+        term["canonical"] for term in data["terms"]
+        if term.get("policy", "auto") == "auto"
+    ]
     if args.all:
         built_in = json.loads(args.lexicon.expanduser().read_text(encoding="utf-8"))
-        for term in sorted(built_in.get("terms", []),
-                           key=lambda t: t["canonical"].lower()):
-            key = term["canonical"].lower()
-            if key not in seen:
-                seen.add(key)
-                canonicals.append(term["canonical"])
+        canonicals.extend(
+            term["canonical"]
+            for term in sorted(built_in.get("terms", []),
+                               key=lambda t: t["canonical"].lower())
+        )
     if not canonicals:
         print(f"личный словарь пуст: {path}", file=sys.stderr)
         return 1
-    canonicals = canonicals[: args.limit]
-    print("Термины: " + ", ".join(canonicals) + ".")
+    prompt = lexicon_prompt_text(canonicals, limit=args.limit)
+    if not prompt:
+        print(f"! термины из {path} не уместились в лимит промпта", file=sys.stderr)
+        return 1
+    print(prompt)
     sys.stdout.flush()
     print("\nпередай строку в dual_transcribe.py run … --initial-prompt "
           "(вместе с именами участников); держись лимита ~30 терминов — "
