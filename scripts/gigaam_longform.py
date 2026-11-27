@@ -2,14 +2,9 @@
 """
 Longform-транскрипция через GigaAM без HF-токена.
 
-Штатный `transcribe_longform` в старых версиях gigaam тянет
-pyannote/segmentation-3.0 (gated → нужен HF_TOKEN). Здесь тот же алгоритм
-нарезки, но VAD — локальный Silero (веса в пакете silero-vad).
-
-Свежие версии gigaam поддерживают `vad_backend="silero"` штатно — тогда
-скрипт просто пробрасывает параметр. Для старых версий модуль
-gigaam.vad_utils подменяется шимом на Silero: pyannote не используется и
-не скачивается (а если pyannote не установлен — и не импортируется вовсе).
+GigaAM 1.0 использует встроенный GigaAM VAD. Для v4 берём форматированный
+текст и таймкоды слов из головы e2e. Старые установки v3 используют
+локальный Silero VAD, через vad_backend либо через совместимый адаптер.
 
 Артефакты пишутся в формате, совместимом со скиллом meeting-transcribe:
     <stem>.transcript.json / .transcript.md / .transcript.srt
@@ -18,6 +13,7 @@ gigaam.vad_utils подменяется шимом на Silero: pyannote не и
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -44,11 +40,7 @@ def fmt_ts_srt(seconds: float) -> str:
 
 
 def native_silero_supported() -> bool:
-    """True, если установленный gigaam умеет vad_backend="silero" штатно.
-
-    В новых версиях silero-бэкенд живёт отдельным модулем
-    gigaam.silero_vad_utils; find_spec не импортирует ни pyannote, ни silero.
-    """
+    """Есть ли в установке v3 свой Silero-бэкенд для vad_backend="silero"."""
     import importlib.util
 
     try:
@@ -68,7 +60,7 @@ def install_silero_vad_shim() -> None:
         print(
             "ERROR: не установлен пакет silero-vad (нужен для нарезки без HF-токена).\n"
             "  pip install silero-vad   # в тот же venv, где стоит gigaam\n"
-            "  подробнее: references/setup.md → «GigaAM v3»",
+            "  подробнее: references/setup.md → «GigaAM»",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -142,7 +134,7 @@ def install_silero_vad_shim() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("input", type=Path)
-    ap.add_argument("--model", default="v3_e2e_rnnt")
+    ap.add_argument("--model", default="v4_rnnt")
     ap.add_argument("--device", default="mps")
     ap.add_argument("--fp16-encoder", action="store_true", default=False)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -155,33 +147,52 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = src.stem + args.suffix
 
-    use_native = native_silero_supported()
-    if use_native:
-        print("[vad] gigaam поддерживает silero штатно (vad_backend)", flush=True)
-    else:
-        install_silero_vad_shim()
     import gigaam
+
+    lf_kwargs = {"word_timestamps": True, "fr_batch_size": args.batch_size}
+    if hasattr(gigaam, "GigaAMVAD"):
+        vad_name = "gigaam-vad"
+    elif args.model.startswith("v4_"):
+        print(
+            "ERROR: для GigaAM v4 нужен пакет gigaam 1.0 с GigaAM VAD. "
+            "Установка в ~/.venvs/asr-v4 описана в references/setup.md. "
+            "Для старой среды укажи --model v3_e2e_rnnt "
+            "(в dual_transcribe.py: --gigaam-model v3_e2e_rnnt).",
+            file=sys.stderr,
+        )
+        return 2
+    else:
+        vad_name = "silero-vad"
+        if native_silero_supported():
+            lf_kwargs["vad_backend"] = "silero"
+        else:
+            install_silero_vad_shim()
+    print(f"[vad] {vad_name}", flush=True)
 
     print(f"[gigaam] загружаю модель {args.model} на {args.device}…", flush=True)
     model = gigaam.load_model(
         args.model, device=args.device, fp16_encoder=args.fp16_encoder
     )
 
-    lf_kwargs = {"word_timestamps": True, "fr_batch_size": args.batch_size}
-    if use_native:
-        lf_kwargs["vad_backend"] = "silero"
+    # В SDK 1.0.0 неизвестные kwargs уходят в VAD. Передаём опцию
+    # только версиям, которые явно объявляют её в API распознавания.
+    if "return_confidence" in inspect.signature(model.transcribe_longform).parameters:
+        lf_kwargs["return_confidence"] = True
 
     started = time.time()
     result = model.transcribe_longform(str(src), **lf_kwargs)
     elapsed = time.time() - started
+    # Релиз v4 декодирует raw и e2e за один проход, включая запись без речи.
+    # У модели v3 даже с новым пакетом результат по-прежнему одиночный.
+    dual_head = isinstance(result, dict)
+    if dual_head:
+        result = result["e2e"]
 
     def _conf(obj) -> float | None:
         """Уверенность декодирования, если её отдаёт установленный gigaam.
 
-        Появилась в gigaam на ветке feat/token-confidence (PR salute-developers/GigaAM#86)
-        как Word.confidence / Segment.confidence = exp(mean(log p)). На апстримном
-        0.2.0 атрибута нет — тогда канал молча отключается, и гибридная сверка
-        просто не использует этот сигнал.
+        PR salute-developers/GigaAM#86 добавляет Word.confidence и
+        Segment.confidence. В официальном пакете 1.0.0 поля отсутствуют.
         """
         value = getattr(obj, "confidence", None)
         return round(value, 4) if isinstance(value, (int, float)) else None
@@ -215,8 +226,8 @@ def main() -> int:
         "model": args.model,
         "device": args.device,
         "fp16_encoder": args.fp16_encoder,
-        "vad": "silero-vad",
-        "language": "ru",
+        "vad": vad_name,
+        "language": "und" if dual_head else "ru",
         "duration_hms": fmt_ts(duration),
         "elapsed_seconds": round(elapsed, 1),
         "elapsed_hms": fmt_ts(elapsed),
@@ -243,8 +254,8 @@ def main() -> int:
         f"# Транскрипт: {src.name}",
         "",
         f"- Длительность: {meta['duration_hms']}",
-        f"- Модель: {args.model} (движок=gigaam, VAD=silero, device={args.device})",
-        "- Язык: ru",
+        f"- Модель: {args.model} (движок=gigaam, VAD={vad_name}, device={args.device})",
+        "- Язык записи не определялся" if dual_head else "- Язык: ru",
         "",
         "---",
         "",

@@ -69,6 +69,14 @@ def venv_python(name: str) -> Path:
     return Path.home() / ".venvs" / name / "bin" / "python"
 
 
+def resolve_gigaam_python() -> Path:
+    configured = os.environ.get("GIGAAM_PYTHON")
+    if configured:
+        return Path(configured).expanduser()
+    current, legacy = venv_python("asr-v4"), venv_python("asr")
+    return legacy if legacy.is_file() and not current.is_file() else current
+
+
 def resolve_whisper_python() -> Path:
     """Тот же выбор интерпретатора, что делает dual_transcribe.py.
 
@@ -206,19 +214,12 @@ def main() -> int:
 
     # ---- GigaAM in its dedicated venv ----
     print("\n3) GigaAM (первая половина двойной сверки русской речи)")
-    default_gigaam_python = (
-        Path.home() / ".venvs/asr/Scripts/python.exe"
-        if os.name == "nt"
-        else Path.home() / ".venvs/asr/bin/python"
-    )
-    gigaam_python = Path(
-        os.environ.get("GIGAAM_PYTHON", str(default_gigaam_python))
-    ).expanduser()
+    gigaam_python = resolve_gigaam_python()
     has_gigaam_python = gigaam_python.is_file()
     check(
         f"Python для GigaAM: {gigaam_python}",
         has_gigaam_python,
-        "создай ~/.venvs/asr и установи GigaAM по references/setup.md",
+        "создай ~/.venvs/asr-v4 и установи GigaAM по references/setup.md",
     )
     has_gigaam = False
     if has_gigaam_python:
@@ -227,7 +228,7 @@ def main() -> int:
                 [
                     str(gigaam_python),
                     "-c",
-                    "import gigaam, torch, silero_vad; print('ok')",
+                    "from gigaam import GigaAMDualASR, GigaAMVAD",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -238,11 +239,9 @@ def main() -> int:
         except (OSError, subprocess.TimeoutExpired):
             has_gigaam = False
         check(
-            "gigaam + torch + silero-vad доступны",
+            "GigaAM v4 и встроенный VAD доступны",
             has_gigaam,
-            "~/.venvs/asr/bin/pip install "
-            "'gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git' "
-            "silero-vad",
+            "установи GigaAM 1.0 в выбранный venv по references/setup.md",
         )
 
     # ---- diarizers ----

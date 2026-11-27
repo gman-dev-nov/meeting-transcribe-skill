@@ -279,6 +279,26 @@ class InterpreterTests(unittest.TestCase):
         with mock.patch.dict(dual.os.environ, {"WHISPER_PYTHON": "/opt/py/bin/python"}):
             self.assertEqual(dual._default_whisper_python(), "/opt/py/bin/python")
 
+    def test_gigaam_interpreter_precedence_matches_setup(self):
+        def check(expected):
+            self.assertEqual(Path(dual._default_gigaam_python()), expected)
+            self.assertEqual(setup_check.resolve_gigaam_python(), expected)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            Path, "home", return_value=Path(tmp)
+        ), mock.patch.dict(dual.os.environ, {"GIGAAM_PYTHON": ""}):
+            legacy = dual._venv_python("asr")
+            current = dual._venv_python("asr-v4")
+            check(current)
+            legacy.parent.mkdir(parents=True)
+            legacy.touch()
+            check(legacy)
+            current.parent.mkdir(parents=True)
+            current.touch()
+            check(current)
+            dual.os.environ["GIGAAM_PYTHON"] = str(legacy)
+            check(legacy)
+
     def test_skill_venv_is_preferred_over_current_interpreter(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -321,6 +341,17 @@ class InterpreterTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_default_and_explicit_gigaam_models_reach_subprocess(self):
+        for flags, expected in (([], "v4_rnnt"), (["--gigaam-model", "v3_e2e_rnnt"], "v3_e2e_rnnt")):
+            with self.subTest(model=expected):
+                args = dual.build_parser().parse_args([
+                    "run", "meeting.wav", "--gigaam-python", sys.executable,
+                    "--whisper-python", sys.executable, "--gigaam-device", "cpu",
+                    "--no-lexicon-prompt", *flags,
+                ])
+                command = dual.build_asr_commands(args, Path("stage"))["gigaam"]
+                self.assertEqual(command[command.index("--model") + 1], expected)
+
     def test_commands_use_separate_suffixes_and_word_timestamps(self):
         args = argparse.Namespace(
             input=Path("/tmp/file with spaces.wav"),

@@ -25,11 +25,11 @@ venv создан через `uv` — в таких окружениях `pip` �
 поломка. Ставить в него нужно так:
 
 ```bash
-uv pip install --python ~/.venvs/asr/bin/python <пакеты>
+uv pip install --python ~/.venvs/asr-v4/bin/python <пакеты>
 ```
 
-Если uv под рукой нет, а pip внутри нужен: `~/.venvs/asr/bin/python -m ensurepip
---upgrade`. Проверить происхождение venv: `cat ~/.venvs/asr/pyvenv.cfg` —
+Если uv под рукой нет, а pip внутри нужен: `~/.venvs/asr-v4/bin/python -m ensurepip
+--upgrade`. Проверить происхождение venv: `cat ~/.venvs/asr-v4/pyvenv.cfg` —
 строка `uv = …` означает, что окружение создано uv.
 
 ## «Ни один бэкенд не готов», хотя faster-whisper установлен
@@ -64,7 +64,7 @@ GigaAM живёт в своём venv и настраивается переме�
 Типовые проверки:
 
 ```bash
-~/.venvs/asr/bin/python3 -c "import gigaam, torch, silero_vad; print('GigaAM OK')"
+~/.venvs/asr-v4/bin/python3 -c "from gigaam import GigaAMDualASR, GigaAMVAD; print('GigaAM OK')"
 python3 scripts/transcribe.py "<путь>" --analyze
 ```
 

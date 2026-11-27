@@ -605,7 +605,8 @@ def _default_gigaam_python() -> str:
     configured = os.environ.get("GIGAAM_PYTHON")
     if configured:
         return configured
-    return str(_venv_python("asr"))
+    current, legacy = _venv_python("asr-v4"), _venv_python("asr")
+    return str(legacy if legacy.is_file() and not current.is_file() else current)
 
 
 def _default_whisper_python() -> str:
@@ -775,8 +776,7 @@ def build_asr_commands(args: argparse.Namespace, staging_dir: Path) -> dict[str,
         "--suffix",
         ".gigaam",
     ]
-    # Настройка языка относится только к Whisper: GigaAM — русскоязычная
-    # модель и всегда идёт отдельным полным проходом без этого флага.
+    # v4 распознаёт русский и английский за один проход. Этот флаг задаёт язык Whisper.
     whisper = [
         whisper_python,
         str(WHISPER_SCRIPT),
@@ -1404,7 +1404,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "mps", "cuda", "cpu"],
         default="auto",
     )
-    run.add_argument("--gigaam-model", default="v3_e2e_rnnt")
+    run.add_argument("--gigaam-model", default="v4_rnnt",
+                     help="Чекпоинт GigaAM (по умолчанию v4_rnnt)")
     run.add_argument("--gigaam-batch-size", type=int, default=8)
     run.add_argument(
         "--whisper-backend",
