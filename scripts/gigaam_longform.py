@@ -185,10 +185,8 @@ def main() -> int:
     def _conf(obj) -> float | None:
         """Уверенность декодирования, если её отдаёт установленный gigaam.
 
-        Появилась в gigaam на ветке feat/token-confidence (PR salute-developers/GigaAM#86)
-        как Word.confidence / Segment.confidence = exp(mean(log p)). На апстримном
-        0.2.0 атрибута нет — тогда канал молча отключается, и гибридная сверка
-        просто не использует этот сигнал.
+        PR salute-developers/GigaAM#86 добавляет Word.confidence и
+        Segment.confidence. В официальном пакете 1.0.0 поля отсутствуют.
         """
         value = getattr(obj, "confidence", None)
         return round(value, 4) if isinstance(value, (int, float)) else None
