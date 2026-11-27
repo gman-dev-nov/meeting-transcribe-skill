@@ -1,6 +1,6 @@
 # meeting-transcribe
 
-Скилл для Claude Code и OpenAI Codex (приложение и CLI): локальная расшифровка созвонов и встреч + автоматический отчёт с TL;DR, решениями, action items и цитатами. ASR работает локально на Mac (Apple Silicon), Linux и Windows. Для русской речи два независимых движка сверяются через активную LLM, а спорные места подтверждает человек.
+Скилл для Claude Code и OpenAI Codex (приложение и CLI): локальная расшифровка созвонов и встреч + автоматический отчёт с TL;DR, решениями, action items и цитатами. ASR работает локально на Mac (Apple Silicon), Linux и Windows. Для русской речи по умолчанию используются GigaAM v4 (`v4_rnnt`) и Whisper `large-v3`: два независимых движка сверяются через активную LLM, а спорные места подтверждает человек.
 
 Скилл использует `SKILL.md`; каталог установки — `~/.claude/skills/` для Claude Code или `~/.agents/skills/` для Codex. В Codex смысловую сверку и отчёт выполняет модель текущей сессии, в том числе Astra, если она доступна в этой сессии. Отдельный OpenAI API-ключ и фиксированная модель Codex не нужны. Политика Whisper `large-v3` относится к локальному ASR, а не к модели ассистента.
 
@@ -15,7 +15,7 @@
 Дальше агент всё сделает сам:
 
 1. посчитает длительность и проверит окружение,
-2. для русской речи прогонит полные GigaAM и Whisper `large-v3` (`quality`, beam=5),
+2. для русской речи прогонит полные GigaAM v4 (`v4_rnnt`) и Whisper `large-v3` (`quality`, beam=5),
 3. сохранит раздельные транскрипты `.gigaam.*` и `.whisper.*`, не перезаписывая их,
 4. сопоставит их по времени и покажет смысловые расхождения: точный интервал исходной записи и обе версии,
 5. попросит прослушать спорные интервалы; правильную версию не выберет автоматически,
@@ -90,10 +90,10 @@
    Не предлагай другую Whisper-модель или пониженный пресет даже ради
    скорости или экономии места.
 
-5. Поставь GigaAM в отдельный venv ~/.venvs/asr (uv или python -m venv, как в
-   шаге 3) и в него:
-         "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git"
-         silero-vad
+5. Создай отдельное окружение ~/.venvs/asr-v4 на Python 3.12. Установи в него
+   "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git@e9bbf2e773eedd217c6f0d3b89b9728c41332b7d".
+   При первом распознавании пакет скачает модель, токенизаторы и детектор речи
+   (в сумме около 470 МиБ).
 
 6. Спроси, нужна ли диаризация (метки спикеров — кто что сказал). Цена:
 
@@ -126,7 +126,7 @@
 
 ## Что умеет
 
-- **Двойная транскрипция русской речи** через локальные GigaAM + Whisper на всей записи: два полных независимых прохода, по умолчанию по очереди.
+- **Двойная транскрипция русской речи.** GigaAM v4 и Whisper независимо обрабатывают всю запись. Оба прохода выполняются локально, по умолчанию по очереди.
 - **LLM-сверка без автоисправления** — критические отрицания, числа, сроки, имена, решения и обязательства показываются человеку с интервалом исходной записи и обеими версиями.
 - **Preflight-анализ перед каждой транскрипцией** — измеряет длительность, тишины, sample rate, битрейт и громкость для оценки времени и предупреждений. Он не выбирает модель или пресет.
 - **Один штатный Whisper-режим** — полная `large-v3`, `quality`, beam=5 для каждой записи; скилл не предлагает более маленькую модель или быстрый пресет.
@@ -141,6 +141,7 @@
 | Компонент | Поведение |
 |---|---|
 | Русская речь | GigaAM + Whisper на всей записи (по очереди; `--parallel` — одновременно), затем LLM-сверка и подтверждение человеком |
+| GigaAM-модель | `v4_rnnt` по умолчанию; `v3_e2e_rnnt` — только при явном выборе старой модели |
 | Whisper-режим | Только `large-v3`, `quality`, beam=5; выбор модели пользователю не показывается |
 | Whisper-бэкенд | `whisper.cpp` на Apple Silicon; `faster-whisper` на остальных платформах |
 | Сверка | Точный интервал исходной записи и обе версии; без аудиоклипа и без предположения о встроенном плеере |
@@ -239,27 +240,26 @@ uv pip install --python ~/.venvs/whisper/bin/python faster-whisper
 
 ### Шаг 4. Установить GigaAM
 
+Установи пакет GigaAM 1.0.0 в отдельное окружение. Пакету нужен Python 3.10 или новее. На Mac проверен Python 3.12.
+
 С uv:
 
 ```bash
-uv venv ~/.venvs/asr
-uv pip install --python ~/.venvs/asr/bin/python \
-  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" \
-  silero-vad
+uv venv --python 3.12 ~/.venvs/asr-v4
+uv pip install --python ~/.venvs/asr-v4/bin/python \
+  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git@e9bbf2e773eedd217c6f0d3b89b9728c41332b7d"
 ```
 
-Без uv:
+Без uv (уже установленный `python3` должен быть версии 3.10 или новее):
 
 ```bash
-python3 -m venv ~/.venvs/asr
-~/.venvs/asr/bin/python -m pip install --upgrade pip
-~/.venvs/asr/bin/python -m pip install \
-  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" \
-  silero-vad
+python3 -m venv ~/.venvs/asr-v4
+~/.venvs/asr-v4/bin/python -m pip install --upgrade pip
+~/.venvs/asr-v4/bin/python -m pip install \
+  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git@e9bbf2e773eedd217c6f0d3b89b9728c41332b7d"
 ```
 
-GigaAM живёт в отдельном venv намеренно: его torch не должен конфликтовать с
-Whisper-бэкендом. Нестандартный путь передаётся переменной `GIGAAM_PYTHON`.
+При первом запуске пакет скачает модель `v4_rnnt` (~464 МиБ), детектор речи (~5,2 МиБ) и два токенизатора. Для следующих запусков достаточно локального кэша.
 
 ### Шаг 5. Диаризация — опционально
 
@@ -322,7 +322,10 @@ python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/dual_transcribe.py" run \
 
 На Linux, Windows и Intel Mac подставь `--whisper-backend faster-whisper`.
 Режим `large-v3` / `quality` / beam=5 зафиксирован в `dual_transcribe.py` и
-не передаётся как пользовательская опция.
+не передаётся как пользовательская опция. Для сравнения с прежней моделью
+добавь `--gigaam-model v3_e2e_rnnt`. Для воспроизведения прежней нарезки
+Silero дополнительно передай `--gigaam-python ~/.venvs/asr/bin/python`.
+Подробности запуска и измерения качества приведены в [описании бэкендов](references/backends.md).
 
 Для смешанной русско-английской записи доступен `--whisper-language auto`
 (по умолчанию `ru`; улучшение точности нужно проверять на своей записи).
@@ -347,13 +350,15 @@ python3 "$MEETING_TRANSCRIBE_SKILL_DIR/scripts/dual_transcribe.py" run \
 `meeting.review-template.json` и логи обоих проходов
 (`meeting.gigaam.log`, `meeting.whisper.log`; при падении — `*.failed.log`).
 
-`scripts/transcribe.py` больше не принимает `--preset`, `--model` и
-`--beam-size`: политика модели зафиксирована в коде, а не в аргументах.
+Whisper-скрипт `scripts/transcribe.py` больше не принимает `--preset`, `--model`
+и `--beam-size`: политика модели зафиксирована в коде, а не в аргументах. Опция
+`--model` у отдельного `gigaam_longform.py` относится только к GigaAM.
 
 `dual_transcribe.py` и `setup_check.py` выбирают интерпретатор Whisper из
 `WHISPER_PYTHON`, затем из стандартного `~/.venvs/whisper`, затем используют
-текущий Python. Для GigaAM — `GIGAAM_PYTHON` либо `~/.venvs/asr`.
-Если пакеты лежат в другом venv, задай соответствующую переменную окружения.
+текущий Python. Для GigaAM порядок такой: `GIGAAM_PYTHON`, затем существующий
+`~/.venvs/asr-v4`, затем `~/.venvs/asr`. Если пакеты лежат в другом venv, задай
+соответствующую переменную окружения.
 whisper.cpp — отдельный бинарник.
 
 ## Структура проекта
@@ -365,7 +370,7 @@ meeting-transcribe/
 │   └── openai.yaml            # метаданные для Codex (опционально, Claude Code игнорирует)
 ├── scripts/
 │   ├── transcribe.py          # основной скрипт транскрипции
-│   ├── gigaam_longform.py     # GigaAM + Silero VAD
+│   ├── gigaam_longform.py     # GigaAM v4 + встроенный GigaAM VAD
 │   ├── dual_transcribe.py     # запуск обоих движков и сверка
 │   ├── quality_review.py      # самоисправления, clean-экспорт и журнал
 │   ├── duo_transcribe.cjs      # явный эксперимент с локальным Type

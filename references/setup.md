@@ -44,7 +44,7 @@ uv pip install --python ~/.venvs/whisper/bin/python resemblyzer scikit-learn "se
 | `python3 -m venv ~/.venvs/<name>` | `~/.venvs/<name>/bin/python -m pip install …` | да |
 
 uv быстрее и сам подтягивает нужную версию Python, поэтому в инструкциях он
-первым. Но **в его venv нет `pip`**, и команды вида `~/.venvs/asr/bin/pip
+первым. Но **в его venv нет `pip`**, и команды вида `~/.venvs/asr-v4/bin/pip
 install` там молча не существуют — это самая частая причина «инструкция не
 работает».
 
@@ -58,7 +58,7 @@ install` там молча не существуют — это самая ча�
 | Переменная | Что задаёт | Если не выставлена |
 |---|---|---|
 | `WHISPER_PYTHON` | интерпретатор для `transcribe.py` (faster-whisper, resemblyzer, pyannote) | `~/.venvs/whisper`, иначе текущий `python3` |
-| `GIGAAM_PYTHON` | интерпретатор для `gigaam_longform.py` (gigaam, torch, silero-vad) | `~/.venvs/asr` |
+| `GIGAAM_PYTHON` | интерпретатор для `gigaam_longform.py` | `~/.venvs/asr-v4`, затем существующий `~/.venvs/asr` |
 
 whisper.cpp — отдельный бинарник, ему интерпретатор безразличен; всё остальное
 ставится в venv, и системный `python3` этих пакетов не увидит. Если пакеты
@@ -84,22 +84,21 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 `cmake` для сборки whisper.cpp тоже ставится без brew: `pip install cmake` (уже в инструкции выше).
 
-## GigaAM v3 (обязателен для русских записей)
+## GigaAM v4 для русских записей
 
-Официальный пакет Сбера. **PyPI-пакет `gigaam` отстаёт от GitHub** (в нём нет v3-чекпоинтов) — ставить только с GitHub:
+Для `v4_rnnt` установи официальный пакет GigaAM 1.0.0 в отдельное окружение. Команды ниже используют проверенную ревизию и Python 3.12. Пакет поддерживает Python начиная с 3.10.
 
 ```bash
-uv venv ~/.venvs/asr
-uv pip install --python ~/.venvs/asr/bin/python \
-  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git" silero-vad
+uv venv --python 3.12 ~/.venvs/asr-v4
+uv pip install --python ~/.venvs/asr-v4/bin/python \
+  "gigaam[torch] @ git+https://github.com/salute-developers/GigaAM.git@e9bbf2e773eedd217c6f0d3b89b9728c41332b7d"
 ```
 
-Без uv: `python3 -m venv ~/.venvs/asr`, затем
-`~/.venvs/asr/bin/python -m pip install …` с теми же пакетами.
+При установке через `venv` создай окружение командой `python3.12 -m venv ~/.venvs/asr-v4` и передай ту же зависимость в `~/.venvs/asr-v4/bin/python -m pip install`. На Windows интерпретатор окружения находится в `Scripts/python.exe`.
 
-Низкоуровневый запуск из этого venv: `~/.venvs/asr/bin/python3 scripts/gigaam_longform.py "запись.m4a" --device mps`. `--device cuda` и `--device cpu` — явные низкоуровневые оверрайды; штатный `dual_transcribe.py` выбирает устройство сам. Чекпоинт `v3_e2e_rnnt` (~0.4 ГБ) скачается при первом запуске.
+При первом запуске пакет скачает ASR-модель (~464 МиБ), GigaAM VAD (~5,2 МиБ) и два токенизатора в `~/.cache/gigaam`. Дальше распознавание и нарезка работают локально. Для декодирования нужен ffmpeg. HF-токен не требуется.
 
-HF-токен НЕ нужен: нарезку по паузам под лимит энкодера GigaAM (~25 сек; жёсткий предел чанка 30 сек) делает локальный Silero VAD — в свежих версиях gigaam штатно (`vad_backend="silero"`), в старых `gigaam_longform.py` подменяет VAD сам. ffmpeg нужен и здесь (декодирование аудио).
+Для сравнения с v3 добавь к двойному проходу `--gigaam-model v3_e2e_rnnt`. В пакете 1.0 обе модели используют GigaAM VAD. Чтобы воспроизвести прежнюю нарезку Silero, выбери также старое окружение через `--gigaam-python ~/.venvs/asr/bin/python`. У отдельного скрипта `gigaam_longform.py` флаг модели называется `--model`.
 
 Проверка полного русского workflow (движки идут по очереди, артефакты
 получают разные суффиксы):
@@ -109,14 +108,8 @@ python3 scripts/dual_transcribe.py run "запись.m4a" \
   --whisper-backend whisper-cpp
 ```
 
-По умолчанию движки запускаются **по очереди**: сначала GigaAM (он в разы
-быстрее и обнаруживает проблемы окружения за пару минут), затем Whisper.
-Флаг `--parallel` включает одновременный запуск, но нужен он редко: на машине
-с общей памятью замер дал 1:53:48 у Whisper в паре против 8:57 у того же
-прохода в одиночку — процесс уходит в своп и не возвращается даже после того,
-как второй движок освободил ресурсы. Выигрыш параллельности ограничен временем
-более быстрого движка (около минуты на 24-минутной записи), так что размен
-оправдан только при заведомом запасе памяти.
+По умолчанию первым запускается GigaAM, затем Whisper. Последовательный запуск
+снижает пиковое потребление памяти. Для одновременного запуска есть флаг `--parallel`.
 
 При OOM скрипт не переключает модель молча — он останавливает процессы и
 сохраняет логи ошибки.
