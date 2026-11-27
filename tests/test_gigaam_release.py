@@ -30,7 +30,8 @@ class LongformReleaseTests(unittest.TestCase):
             spec.loader.exec_module(self.longform)
 
     def run_main(self, result, *flags, native_silero=False):
-        self.model.transcribe_longform.return_value = result
+        if isinstance(self.model.transcribe_longform, mock.Mock):
+            self.model.transcribe_longform.return_value = result
         with mock.patch.dict(sys.modules, {"gigaam": self.sdk, "silero_vad": None}), \
                 mock.patch.object(self.longform, "native_silero_supported", return_value=native_silero), \
                 mock.patch.object(self.longform, "install_silero_vad_shim") as shim, \
@@ -59,6 +60,19 @@ class LongformReleaseTests(unittest.TestCase):
         ])
         for suffix in (".transcript.md", ".transcript.srt"):
             self.assertIn("Привет!", self.audio.with_suffix(suffix).read_text(encoding="utf-8"))
+
+    def test_requests_scores_from_sdk_that_exposes_confidence(self):
+        def transcribe(wav, *, word_timestamps, fr_batch_size, return_confidence=False):
+            self.assertTrue(return_confidence)
+            word = SimpleNamespace(text="Слово", start=0.1, end=0.4, confidence=0.81234)
+            segment = SimpleNamespace(text=word.text, start=0.0, end=0.5, words=[word], confidence=0.91)
+            return {"e2e": SimpleNamespace(segments=[segment])}
+
+        self.model.transcribe_longform = transcribe
+        data = self.run_main(None)
+        self.assertTrue(data["metadata"]["has_confidence"])
+        self.assertEqual(data["segments"][0]["conf"], 0.91)
+        self.assertEqual(data["segments"][0]["words"][0]["conf"], 0.8123)
 
     def test_v4_with_no_speech_writes_an_empty_transcript(self):
         empty = SimpleNamespace(segments=[])

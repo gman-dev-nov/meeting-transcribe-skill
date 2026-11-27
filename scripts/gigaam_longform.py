@@ -13,6 +13,7 @@ GigaAM 1.0 использует встроенный GigaAM VAD. Для v4 бе�
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 import time
@@ -172,6 +173,11 @@ def main() -> int:
     model = gigaam.load_model(
         args.model, device=args.device, fp16_encoder=args.fp16_encoder
     )
+
+    # В SDK 1.0.0 неизвестные kwargs уходят в VAD. Передаём опцию
+    # только версиям, которые явно объявляют её в API распознавания.
+    if "return_confidence" in inspect.signature(model.transcribe_longform).parameters:
+        lf_kwargs["return_confidence"] = True
 
     started = time.time()
     result = model.transcribe_longform(str(src), **lf_kwargs)
